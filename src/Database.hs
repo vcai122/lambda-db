@@ -15,22 +15,26 @@ data DatabaseError
   | InvalidOperation String
   deriving (Eq, Show)
 
--- | Return type for database operations.
+-- | Return type for database operations
 type DatabaseResult a = Either DatabaseError a
 
-
+-- | Insert key-value pair into the table
 insertDatabase :: Database -> TableName -> Int -> String -> DatabaseResult Database
 insertDatabase = undefined
 
+-- | Lookup value by key in a table
 lookupDatabase :: Database -> TableName -> Int -> DatabaseResult String
 lookupDatabase = undefined
 
+-- | Delete key-value pair from a table
 deleteDatabase :: Database -> TableName -> Int -> DatabaseResult Database
 deleteDatabase = undefined
 
+-- | Create new table in database
 createTable :: Database -> TableName -> DatabaseResult Database
 createTable = undefined
 
+-- | Execute query on database
 executeQuery :: Database -> Query -> DatabaseResult Database
 executeQuery = undefined
 
