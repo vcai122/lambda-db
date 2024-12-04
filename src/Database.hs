@@ -3,12 +3,11 @@ module Database where
 import BTree (BTree)
 import Test.HUnit (Assertion, Counts, Test (..), assert, runTestTT, (~:), (~?=))
 
-
--- | TableName -> BTree.
+-- | TableName -> BTree
 newtype Database = Database (M.Map TableName BTree)
   deriving (Eq, Show)
 
--- | Error handling for database operations.
+-- | Error handling for database operations
 data DatabaseError
   = TableNotFound TableName
   | KeyNotFound String
@@ -37,7 +36,6 @@ createTable = undefined
 -- | Execute query on database
 executeQuery :: Database -> Query -> DatabaseResult Database
 executeQuery = undefined
-
 
 -- | Testing:
 table1 :: TableName
