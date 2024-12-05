@@ -7,7 +7,7 @@ import Data.List (nub)
 import Test.HUnit
 import Test.QuickCheck
 import Test.QuickCheck.Monadic (assert, monadicIO, run)
-import qualified Test.QuickCheck.Monadic as QM
+import Test.QuickCheck.Monadic qualified as QM
 import Prelude hiding (lookup)
 
 data BTree k v = BTree
@@ -107,6 +107,7 @@ prop_deleteNonExistingKey k = monadicIO $ do
   result <- run $ lookup btree k
   QM.assert (result == Nothing)
 
+-- mutliple inserts and lookups work properly
 prop_multipleInsertLookup :: Property
 prop_multipleInsertLookup = forAll genUniqueKeyValues $ \kvs -> monadicIO $ do
   btree <- run $ emptyBTree 2
@@ -120,3 +121,19 @@ prop_multipleInsertLookup = forAll genUniqueKeyValues $ \kvs -> monadicIO $ do
       keys <- nub <$> listOf arbitrary
       values <- vectorOf (length keys) arbitrary
       return $ zip keys values
+
+-- adding an element does not delete others
+prop_addElementDoesNotDeleteOthers :: [(Int, String)] -> (Int, String) -> Property
+prop_addElementDoesNotDeleteOthers initialElements newElement =
+  length initialElements
+    == length uniqueInitialElements
+      ==> monadicIO
+    $ do
+      btree <- run (emptyBTree 2 :: IO (BTree Int String))
+      run $ forM_ uniqueInitialElements $ \kv -> insert btree kv
+      run $ insert btree newElement
+      results <- run $ mapM (\(k, _) -> lookup btree k) uniqueInitialElements
+      let expected = map (Just . snd) uniqueInitialElements
+      QM.assert (results == expected)
+  where
+    uniqueInitialElements = nub initialElements
