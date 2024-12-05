@@ -1,8 +1,13 @@
 module BTree where
 
 import Block (Block (Block), BlockID)
+import Control.Monad (forM_)
 import Data.IORef (IORef)
+import Data.List (nub)
 import Test.HUnit
+import Test.QuickCheck
+import Test.QuickCheck.Monadic (assert, monadicIO, run)
+import qualified Test.QuickCheck.Monadic as QM
 import Prelude hiding (lookup)
 
 data BTree k v = BTree
@@ -67,3 +72,51 @@ testLookup = TestCase $ do
   result2 <- lookup btree 15
   assertEqual "Lookup existing key 6" (Just "Value6") result1
   assertEqual "Lookup non-existing key 15" Nothing result2
+
+-- insert then lookup should return value inserted
+prop_insertLookup :: Int -> String -> Property
+prop_insertLookup k v = monadicIO $ do
+  btree <- run $ emptyBTree 2
+  run $ insert btree (k, v)
+  result <- run $ lookup btree k
+  QM.assert (result == Just v)
+
+-- insert then deleting a value should return nothing
+prop_insertDeleteLookup :: Int -> String -> Property
+prop_insertDeleteLookup k v = monadicIO $ do
+  btree <- run $ emptyBTree 2
+  run $ insert btree (k, v)
+  run $ delete btree k
+  result <- run $ lookup btree k
+  QM.assert (result == Nothing)
+
+-- inserting a key twice should update the value
+prop_duplicateKeyUpdate :: Int -> String -> String -> Property
+prop_duplicateKeyUpdate k v1 v2 = monadicIO $ do
+  btree <- run $ emptyBTree 2
+  run $ insert btree (k, v1)
+  run $ insert btree (k, v2)
+  result <- run $ lookup btree k
+  QM.assert (result == Just v2)
+
+-- deleting a non-existing key should return nothing
+prop_deleteNonExistingKey :: Int -> Property
+prop_deleteNonExistingKey k = monadicIO $ do
+  btree <- run (emptyBTree 2 :: IO (BTree Int String))
+  run $ delete btree k
+  result <- run $ lookup btree k
+  QM.assert (result == Nothing)
+
+prop_multipleInsertLookup :: Property
+prop_multipleInsertLookup = forAll genUniqueKeyValues $ \kvs -> monadicIO $ do
+  btree <- run $ emptyBTree 2
+  run $ forM_ kvs $ \(k, v) -> insert btree (k, v)
+  results <- run $ mapM (lookup btree . fst) kvs
+  let expected = map (Just . snd) kvs
+  QM.assert (results == expected)
+  where
+    genUniqueKeyValues :: Gen [(Int, String)]
+    genUniqueKeyValues = do
+      keys <- nub <$> listOf arbitrary
+      values <- vectorOf (length keys) arbitrary
+      return $ zip keys values
