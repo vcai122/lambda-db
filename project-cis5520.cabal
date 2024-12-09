@@ -32,6 +32,7 @@ common common-stanza
     , random
     , mtl
     , doctest
+    , parsec
     , cereal
     , bytestring
   default-language:
@@ -44,6 +45,9 @@ library
       common-stanza
   exposed-modules:
       Lib
+      BTree
+      Query
+      Database
       -- if you add modules to your project, list them here
       -- so that they will be available to the executable and test suite
   hs-source-dirs:
