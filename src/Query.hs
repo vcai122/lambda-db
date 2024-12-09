@@ -1,3 +1,4 @@
+import Control.Monad (void)
 import Data.Char (isSpace)
 import Data.Char qualified as Char
 import Data.Kind (Type)
@@ -273,7 +274,8 @@ caseInsensitiveStringP s = P.try (doIt <* P.spaces)
   where
     doIt = do
       chars <- P.count (length s) P.anyChar
-      P.lookAhead (P.satisfy isWordStopChar)
+      -- P.lookAhead (P.satisfy isWordStopChar) *> pure () P.<|> P.eof
+      P.choice [P.eof, P.lookAhead $ void (P.satisfy isWordStopChar)]
       if map Char.toLower chars == map Char.toLower s
         then return chars
         else fail ("looking for\n" ++ s ++ "\nbut got\n" ++ chars)
@@ -381,6 +383,8 @@ columnsParser = P.choice [allParser, regularParser]
 
 prop_columnsParser :: Columns -> Bool
 prop_columnsParser c = P.parse columnsParser "" (prettyPrint c) == Right c
+
+c = Columns [Aliased {name = Nothing, value = Value NilVal}]
 
 orderKeyParser :: Parser OrderKey
 orderKeyParser = do
@@ -504,3 +508,20 @@ runAllTests = do
   QC.quickCheck prop_roundTrip
   putStrLn "All tests passed"
   return ()
+
+-- >>> runAllTests
+
+query =
+  "SELECT a, b, c\n\
+  \FROM (SELECT * FROM X) AS t1 \n\
+  \JOIN table2 AS t2 \n\
+  \ON t2.xyz = t1.xyz \n\
+  \JOIN (SELECT * FROM (SELECT a FROM Y))\n\
+  \ON a = t1.xyz \n\
+  \WHERE (t1.xyz=123)\n\
+  \ORDER BY a ASC, b DSC\n\
+  \LIMIT 100"
+
+parsed = parseQuery query
+
+-- parsed_as_query = prettyPrint
