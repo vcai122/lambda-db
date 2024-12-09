@@ -60,9 +60,14 @@ insertBTree key value (BTree t rootNode)
 -- | Insert into a node that is known to be non-full
 insertNonFull :: (Ord k) => Int -> k -> v -> BTreeNode k v -> BTreeNode k v
 insertNonFull tVal key value (LeafNode ks vs) =
-  let (leftKs, rightKs) = break (> key) ks
-      (leftVs, rightVs) = splitAt (length leftKs) vs
-   in LeafNode (leftKs ++ [key] ++ rightKs) (leftVs ++ [value] ++ rightVs)
+  case break (>= key) ks of
+    (left, x:right) | x == key ->
+      let (leftVs, _:rightVs) = splitAt (length left) vs
+      in LeafNode (left ++ (x:right)) (leftVs ++ (value:rightVs)) -- handle dupe
+    _ ->
+      let (leftKs, rightKs) = break (> key) ks
+          (leftVs, rightVs) = splitAt (length leftKs) vs
+      in LeafNode (leftKs ++ [key] ++ rightKs) (leftVs ++ [value] ++ rightVs)
 insertNonFull tVal key value (InternalNode ks cs) =
   let idx = findChildIndex key ks
       child = cs !! idx
@@ -263,7 +268,7 @@ testLookup = TestCase $ do
   let bt = createSampleBTree
   let result1 = lookupValue 6 bt
   let result2 = lookupValue 15 bt
-  assertEqual "Lookup existing key 6" (Just "Value6") result1
+  assertEqual "Lookup eximsting key 6" (Just "Value6") result1
   assertEqual "Lookup non-existing key 15" Nothing result2
 
 -- >>> runTestTT testLookup
