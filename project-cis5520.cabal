@@ -33,6 +33,8 @@ common common-stanza
     , mtl
     , doctest
     , parsec
+    , cereal
+    , bytestring
   default-language:
     GHC2021
   default-extensions:
