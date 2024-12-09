@@ -32,6 +32,8 @@ common common-stanza
     , random
     , mtl
     , doctest
+    , cereal
+    , bytestring
   default-language:
     GHC2021
   default-extensions:
