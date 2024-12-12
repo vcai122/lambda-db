@@ -68,7 +68,7 @@ instance Arbitrary Row where
         allVals = pkVal : vals
     return $ Row pkVal allCols allVals
 
--- | Represents a table in the database
+-- Represents a table in the database
 data DbTable = DbTable
   { dbTableName :: VariableName,
     dbPrimaryKeyName :: VariableName,
@@ -93,7 +93,7 @@ instance Eq DbTable where
       && dbPrimaryKeyName t1 == dbPrimaryKeyName t2
       && dbOtherColumnNames t1 == dbOtherColumnNames t2
 
--- | Database represents the entire database
+-- Database represents the entire database
 data Database = Database
   { dbTables :: [(VariableName, DbTable)]
   }
@@ -108,7 +108,7 @@ instance Serialize Database where
 
 data EvalContext = EvalContext
   { currentTable :: Maybe VariableName,
-    aliases :: [(VariableName, VariableName)], -- (alias, actual table name)
+    aliases :: [(VariableName, VariableName)],
     allTables :: [(VariableName, DbTable)]
   }
 
@@ -116,11 +116,11 @@ data EvalContext = EvalContext
 primaryKeyName :: VariableName
 primaryKeyName = VariableName "id"
 
--- | Create an empty database
+-- Create an empty database
 emptyDatabase :: Database
 emptyDatabase = Database []
 
--- | Create an empty table with specified name and columns
+-- Create an empty table with specified name and columns
 createTable :: VariableName -> VariableName -> [VariableName] -> Database -> Database
 createTable tName pkName colNames db =
   Database $ (tName, newTable) : dbTables db
@@ -134,7 +134,7 @@ createTable tName pkName colNames db =
           dbSecondaryIndices = []
         }
 
--- | Insert a row into a table
+-- Insert row into a table
 insertRow :: VariableName -> Row -> Database -> Database
 insertRow tName row db =
   Database $ map updateTable (dbTables db)
@@ -143,7 +143,7 @@ insertRow tName row db =
       | name == tName = (name, insertIntoTable row table)
       | otherwise = (name, table)
 
--- | Insert a row into a specific table
+-- Insert row into a specific table
 insertIntoTable :: Row -> DbTable -> DbTable
 insertIntoTable row table =
   table
@@ -155,7 +155,7 @@ insertIntoTable row table =
       let colValue = lookupColumnValue colName row table
        in (colName, insert (colValue, primaryKey row) index)
 
--- | Helper to look up a column value in a row
+-- Helper: looks up a column value in a row
 lookupColumnValue :: VariableName -> Row -> DbTable -> Value
 lookupColumnValue colName (Row pk cols vals) table =
   case lookup colName (zip cols vals) of
@@ -165,7 +165,7 @@ lookupColumnValue colName (Row pk cols vals) table =
         then pk
         else error "Column not found"
 
--- Build alias map from IntermediaryTable
+-- Build alias map from IntermediaryTable for query parsing
 buildAliasMap :: IntermediaryTable -> [(VariableName, VariableName)]
 buildAliasMap (Q.Table (Aliased alias t)) =
   case alias of
@@ -176,7 +176,7 @@ buildAliasMap (TableResult (Aliased alias _)) =
 buildAliasMap (Join l r _) =
   buildAliasMap l ++ buildAliasMap r
 
--- | Execute a query on the database
+-- Execute a query on the database
 executeQuery :: Query -> Database -> (Database, [Row])
 executeQuery (SELECT tableResult) db =
   let (rows) = executeTableResult tableResult db
@@ -184,14 +184,14 @@ executeQuery (SELECT tableResult) db =
 executeQuery (INSERT tbl cols tResult) db =
   let insertedRows = executeTableResult tResult db
       updatedDb = foldr (insertRow tbl) db insertedRows
-   in (updatedDb, []) -- INSERT does not produce result rows
+   in (updatedDb, [])
 executeQuery (CREATE tbl cols) db =
   let pk = fst (head cols)
       allCols = map fst cols
       updatedDb = Database.createTable tbl pk allCols db
-   in (updatedDb, []) -- CREATE does not produce result rows
+   in (updatedDb, [])
 
--- | Execute a table result query
+-- Executes a table result query
 executeTableResult :: TableResult -> Database -> [Row]
 executeTableResult (BasicSelect cols from whereClause orderKeys limitCount) db =
   let baseRows = getRowsFromFrom from db
@@ -208,7 +208,7 @@ executeTableResult (ValueTable v) _ =
   where
     fakeCols n = [VariableName ("col" ++ show x) | x <- [1 .. n]]
 
--- | Get rows from a FROM clause
+-- Get rows from a FROM clause
 getRowsFromFrom :: IntermediaryTable -> Database -> [Row]
 getRowsFromFrom (Q.Table (Aliased _ name)) db =
   case lookup name (dbTables db) of
@@ -224,7 +224,8 @@ getRowsFromFrom (Join left right expr) db =
     -- Combine rows from two tables into one row
     combineRows (Row pk1 c1 v1) (Row pk2 c2 v2) =
       -- If they share the same PK name, we might just choose one. Otherwise, combine.
-      -- Ideally, we should ensure no column name conflicts. For simplicity, just merge columns:
+      -- Ideally, we should ensure no column name conflicts
+      -- Just merge columns:
       let newCols = nub (c1 ++ c2)
           newVals = map (findVal [(c1, v1), (c2, v2)]) newCols
        in -- If multiple tables have the same column, take the first found
@@ -233,10 +234,10 @@ getRowsFromFrom (Join left right expr) db =
       fromMaybe NilVal (foldr (\(cc, vv) acc -> acc <|> lookup col (zip cc vv)) Nothing rowSets)
     (<|>) = mplus
 getRowsFromFrom (TableResult (Aliased _ sub)) db =
-  -- Just execute the subquery
+  -- Execute the subquery
   executeTableResult sub db
 
--- | Get all rows from a table
+-- Get all rows from a table
 getAllRows :: DbTable -> [Row]
 getAllRows table =
   catMaybes [lookupValue k (dbPrimaryIndex table) | k <- getAllKeys (dbPrimaryIndex table)]
@@ -329,7 +330,7 @@ evaluateExpressionJoinWithCtx (Column (ColumnName tNameM name)) db ctx r1 r2 =
             then fromMaybe (error $ "Column not found: " ++ show name) (findValueInRow name r1)
             else fromMaybe (error $ "Column not found: " ++ show name) (findValueInRow name r2)
 evaluateExpressionJoinWithCtx (Value v) _ _ _ _ = v
-evaluateExpressionJoinWithCtx _ _ _ _ _ = error "Complex join expressions not implemented"
+evaluateExpressionJoinWithCtx _ _ _ _ _ = error "These expressions not implemented"
 
 -- Evaluate conditions with context
 evaluateWhereExpressionWithCtx :: Expression -> Database -> EvalContext -> Row -> Bool
@@ -380,13 +381,13 @@ compareValues op v1 v2 = case (op, v1, v2) of
   (Concat, StringVal s1, StringVal s2) -> error "String concatenation not implemented"
   _ -> error $ "Invalid comparison or mismatched types in compareValues: " ++ show (op, v1, v2)
 
--- | Apply ORDER BY
+-- Apply ORDER BY
 applyOrdering :: [OrderKey] -> Database -> EvalContext -> [Row] -> [Row]
 applyOrdering [] _ _ rows = rows
 applyOrdering keys db ctx rows =
   sortBy (compareRows keys db ctx) rows
 
--- | Compare rows based on order keys
+-- Compare rows based on order keys
 compareRows :: [OrderKey] -> Database -> EvalContext -> Row -> Row -> Ordering
 compareRows keys db ctx row1 row2 =
   foldr combineOrderings EQ $ map (compareByKey row1 row2) keys
@@ -399,7 +400,7 @@ compareRows keys db ctx row1 row2 =
     combineOrderings EQ o = o
     combineOrderings o _ = o
 
--- | Project specific columns
+-- Project specific columns
 projectColumns :: Columns -> Database -> EvalContext -> [Row] -> [Row]
 projectColumns AllColumns _ _ rows = rows
 projectColumns (Columns cols) db ctx rows =
@@ -412,9 +413,10 @@ projectRow cols db ctx row =
       projectedPk = primaryKey row
    in Row projectedPk projectedNames projectedVals
 
--- A helper to get the projected column name
--- If the alias is provided, use it. Otherwise, if it's a Column, use the column's name.
--- If it's some other expression without alias, fallback to "expr".
+-- Helper: gets the projected column name
+-- If the alias is provided, use it
+-- Else, if it's a Column, use the column's name.
+-- If it's some other expression without alias, fallback to "expr"
 getProjectedName :: Aliased Expression -> Value -> VariableName
 getProjectedName (Aliased (Just n) _) _ = n
 getProjectedName (Aliased Nothing expr) _ =
@@ -424,13 +426,13 @@ getProjectedName (Aliased Nothing expr) _ =
 
 -- Serialization functions
 
--- | Save database to file
+-- Save database to file
 saveDatabase :: FilePath -> Database -> IO ()
 saveDatabase fp db = do
   let bs = S.encode db
   BS.writeFile fp bs
 
--- | Load database from file
+-- Load database from file
 loadDatabase :: FilePath -> IO Database
 loadDatabase fp = do
   exists <- doesFileExist fp
@@ -721,7 +723,6 @@ testMultipleOrderBy = TestCase $ do
             ]
             Nothing
       (dbAfter, rows) = executeQuery query db''
-  -- Highest grade is 90. Among those with 90, the lowest age is 19, so that should come first.
   assertEqual
     "First result should be id=2"
     (IntVal 2)
@@ -1163,11 +1164,10 @@ prop_createDropCreate tableName columns =
   not (null columns) ==>
     let columns' = nub columns
         db1 = Database.createTable tableName (head columns') columns' emptyDatabase
-        -- dropping not implemented, but we can at least check two identical creates
         db2 = Database.createTable tableName (head columns') columns' emptyDatabase
      in db1 == db2
 
--- Assuming we have Arbitrary instances for keys and values, or use Int, String directly:
+-- Serialize a BTree and deserialize it, should be the same
 prop_serializeDeserializeBTree :: [(Int, String)] -> Property
 prop_serializeDeserializeBTree kvs =
   let uniqueKvs = nub kvs
@@ -1175,19 +1175,18 @@ prop_serializeDeserializeBTree kvs =
       encoded = S.encode bt
    in S.decode encoded === Right bt
 
--- 1. After create and insert, select returns inserted rows
+-- After create and insert, select returns inserted rows
 prop_createInsertSelect :: [(String, Int)] -> Property
 prop_createInsertSelect kvs =
   not (null kvs) ==>
     let db = emptyDatabase
-        -- create a table with (name:string, grade:int)
         (dbC, _) = executeQuery (CREATE (VariableName "tbl") [(VariableName "name", Q.StringType), (VariableName "grade", Q.IntType)]) db
         valTab = ValueTable (map (\(n, g) -> [StringVal n, IntVal g]) kvs)
         (dbI, _) = executeQuery (INSERT (VariableName "tbl") [VariableName "name", VariableName "grade"] valTab) dbC
         (_, rows) = executeQuery (SELECT (BasicSelect AllColumns (Q.Table (Aliased Nothing (VariableName "tbl"))) Nothing [] Nothing)) dbI
      in length rows == length kvs
 
--- 2. Insert multiple distinct keys and ensure they appear in select
+-- Insert multiple distinct keys and ensure they appear in select
 prop_insertMultipleDistinct :: [Int] -> Property
 prop_insertMultipleDistinct xs =
   not (null xs) ==>
@@ -1199,7 +1198,7 @@ prop_insertMultipleDistinct xs =
         (_, rows) = executeQuery (SELECT (BasicSelect AllColumns (Q.Table (Aliased Nothing (VariableName "nums"))) Nothing [] Nothing)) dbI
      in length rows == length uniqueXs
 
--- 3. Create multiple tables and insert into both, ensure queries return correct data
+-- Create multiple tables and insert into both, ensure queries return correct data
 prop_twoTables :: [(String, Int)] -> [(String, Int)] -> Property
 prop_twoTables kvs1 kvs2 =
   not (null kvs1) && not (null kvs2) ==>
@@ -1242,7 +1241,6 @@ runTests = do
           testCreateInsertAndSelectWithWhere,
           testInsertFromSelect
         ]
-  putStrLn "\nRunning QuickCheck properties..."
   putStrLn "Testing insert and query by PK"
   quickCheck prop_insertAndQueryByPK
   putStrLn "Testing order by maintains order"
@@ -1263,4 +1261,3 @@ runTests = do
   quickCheck prop_insertMultipleDistinct
   putStrLn "Testing two tables"
   quickCheck prop_twoTables
-  putStrLn "All tests done!"
