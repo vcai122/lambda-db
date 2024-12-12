@@ -1,3 +1,5 @@
+module Query where
+
 import Control.Monad (void)
 import Data.Char (isSpace)
 import Data.Char qualified as Char
@@ -5,6 +7,8 @@ import Data.Kind (Type)
 import Data.List (elemIndex)
 import Data.List qualified as List
 import Data.Maybe qualified as Maybe
+import Data.Serialize (Serialize)
+import Data.Serialize qualified as S
 import Test.HUnit (Assertion, Counts, Test (..), assert, runTestTT, (~:), (~?=))
 import Test.QuickCheck (Arbitrary (..), Gen, Property, (==>))
 import Test.QuickCheck qualified as QC
@@ -105,6 +109,47 @@ instance Pretty Value where
   prettyPrint (BoolVal True) = "TRUE"
   prettyPrint (BoolVal False) = "FALSE"
   prettyPrint (StringVal s) = "\"" ++ s ++ "\""
+
+instance Serialize VariableName where
+  put (VariableName s) = S.put s
+  get = VariableName <$> S.get
+
+instance Ord VariableName where
+  compare (VariableName s1) (VariableName s2) = compare s1 s2
+
+instance Serialize Value where
+  put NilVal = S.putWord8 0
+  put (IntVal i) = S.putWord8 1 >> S.put i
+  put (DoubleVal d) = S.putWord8 2 >> S.put d
+  put (BoolVal b) = S.putWord8 3 >> S.put b
+  put (StringVal s) = S.putWord8 4 >> S.put s
+
+  get = do
+    tag <- S.getWord8
+    case tag of
+      0 -> return NilVal
+      1 -> IntVal <$> S.get
+      2 -> DoubleVal <$> S.get
+      3 -> BoolVal <$> S.get
+      4 -> StringVal <$> S.get
+      _ -> fail "Invalid Value tag"
+
+instance Ord Value where
+  compare NilVal NilVal = EQ
+  compare NilVal _ = LT
+  compare _ NilVal = GT
+  compare (IntVal i1) (IntVal i2) = compare i1 i2
+  compare (DoubleVal d1) (DoubleVal d2) = compare d1 d2
+  compare (BoolVal b1) (BoolVal b2) = compare b1 b2
+  compare (StringVal s1) (StringVal s2) = compare s1 s2
+  compare v1 v2 = compare (valueTypeOrder v1) (valueTypeOrder v2)
+    where
+      valueTypeOrder :: Value -> Int
+      valueTypeOrder NilVal = 0
+      valueTypeOrder (IntVal _) = 1
+      valueTypeOrder (DoubleVal _) = 2
+      valueTypeOrder (BoolVal _) = 3
+      valueTypeOrder (StringVal _) = 4
 
 data Aliased a = Aliased
   { name :: Maybe VariableName,

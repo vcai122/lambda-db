@@ -1,13 +1,12 @@
 module BTree where
 
 import Data.ByteString qualified as BS
+import Data.List (nub)
 import Data.Serialize qualified as S
 import GHC.Generics (Generic)
 import System.Directory (createDirectoryIfMissing, doesFileExist)
-
-import Test.HUnit (runTestTT, Test(..), assert, (~:), (~?=), assertEqual)
+import Test.HUnit (Test (..), assert, assertEqual, runTestTT, (~:), (~?=))
 import Test.QuickCheck
-import Data.List (nub)
 
 data BTreeNode k v
   = InternalNode
@@ -61,13 +60,14 @@ insertBTree key value (BTree t rootNode)
 insertNonFull :: (Ord k) => Int -> k -> v -> BTreeNode k v -> BTreeNode k v
 insertNonFull tVal key value (LeafNode ks vs) =
   case break (>= key) ks of
-    (left, x:right) | x == key ->
-      let (leftVs, _:rightVs) = splitAt (length left) vs
-      in LeafNode (left ++ (x:right)) (leftVs ++ (value:rightVs)) -- handle dupe
+    (left, x : right)
+      | x == key ->
+          let (leftVs, _ : rightVs) = splitAt (length left) vs
+           in LeafNode (left ++ (x : right)) (leftVs ++ (value : rightVs)) -- handle dupe
     _ ->
       let (leftKs, rightKs) = break (> key) ks
           (leftVs, rightVs) = splitAt (length leftKs) vs
-      in LeafNode (leftKs ++ [key] ++ rightKs) (leftVs ++ [value] ++ rightVs)
+       in LeafNode (leftKs ++ [key] ++ rightKs) (leftVs ++ [value] ++ rightVs)
 insertNonFull tVal key value (InternalNode ks cs) =
   let idx = findChildIndex key ks
       child = cs !! idx
@@ -148,6 +148,24 @@ getPredecessor (InternalNode ks cs) =
 isLeaf :: BTreeNode k v -> Bool
 isLeaf (LeafNode _ _) = True
 isLeaf _ = False
+
+-- TODO: Start of Arman added functions:
+
+-- | Get all keys in the B-tree in sorted order
+getAllKeys :: (Ord k) => BTree k v -> [k]
+getAllKeys (BTree _ root) = getAllKeysNode root
+
+-- | Helper function to get all keys from a node
+getAllKeysNode :: (Ord k) => BTreeNode k v -> [k]
+getAllKeysNode (LeafNode ks _) = ks
+getAllKeysNode (InternalNode ks cs) =
+  -- Get keys from first child
+  let firstKeys = getAllKeysNode (head cs)
+      -- Pair remaining children with keys
+      restKeys = concat $ zipWith (\k c -> [k] ++ getAllKeysNode c) ks (tail cs)
+   in firstKeys ++ restKeys
+
+-- TODO: End of Arman added functions
 
 -- | Fix child underflow if needed.
 -- TODO: impl
@@ -243,16 +261,16 @@ createSampleBTree :: BTree Int String
 createSampleBTree =
   let initial = emptyBTree 2
       inserts =
-        [ (10, "Value10")
-        , (20, "Value20")
-        , (5,  "Value5")
-        , (6,  "Value6")
-        , (12, "Value12")
-        , (30, "Value30")
-        , (7,  "Value7")
-        , (17, "Value17")
+        [ (10, "Value10"),
+          (20, "Value20"),
+          (5, "Value5"),
+          (6, "Value6"),
+          (12, "Value12"),
+          (30, "Value30"),
+          (7, "Value7"),
+          (17, "Value17")
         ]
-  in foldr insert initial inserts
+   in foldr insert initial inserts
 
 testInsert :: Test
 testInsert = TestCase $ do
@@ -282,36 +300,36 @@ testLookup = TestCase $ do
 prop_insertLookup :: Int -> String -> Bool
 prop_insertLookup k v =
   let bt = insert (k, v) (emptyBTree 2)
-  in lookupValue k bt == Just v
+   in lookupValue k bt == Just v
 
 -- insert then deleting a value should return nothing
 prop_insertDeleteLookup :: Int -> String -> Bool
 prop_insertDeleteLookup k v =
   let bt = insert (k, v) (emptyBTree 2)
       bt' = deleteBTree k bt
-  in lookupValue k bt' == Nothing
+   in lookupValue k bt' == Nothing
 
 -- inserting a key twice should update the value
 prop_duplicateKeyUpdate :: Int -> String -> String -> Bool
 prop_duplicateKeyUpdate k v1 v2 =
   let bt = insert (k, v1) (emptyBTree 2)
       bt' = insert (k, v2) bt
-  in lookupValue k bt' == Just v2
+   in lookupValue k bt' == Just v2
 
 -- deleting a non-existing key should return nothing for that key
 prop_deleteNonExistingKey :: Int -> Bool
 prop_deleteNonExistingKey k =
   let bt = deleteBTree k (emptyBTree 2 :: BTree Int String)
-  in lookupValue k bt == Nothing
+   in lookupValue k bt == Nothing
 
 -- multiple inserts and lookups
 prop_multipleInsertLookup :: [(Int, String)] -> Property
 prop_multipleInsertLookup kvs =
   let uniqueKvs = nub kvs
       bt = foldr insert (emptyBTree 2) uniqueKvs
-      results = map (\(k,_) -> lookupValue k bt) uniqueKvs
+      results = map (\(k, _) -> lookupValue k bt) uniqueKvs
       expected = map (Just . snd) uniqueKvs
-  in length kvs == length uniqueKvs ==> results == expected
+   in length kvs == length uniqueKvs ==> results == expected
 
 -- adding an element does not delete others
 prop_addElementDoesNotDeleteOthers :: [(Int, String)] -> (Int, String) -> Property
@@ -321,7 +339,7 @@ prop_addElementDoesNotDeleteOthers initialElements newElement =
       btFinal = insert newElement btInitial
       results = map (\(k, _) -> lookupValue k btFinal) uniqueInitialElements
       expected = map (Just . snd) uniqueInitialElements
-  in length initialElements == length uniqueInitialElements ==> results == expected
+   in length initialElements == length uniqueInitialElements ==> results == expected
 
 main :: IO ()
 main = do
