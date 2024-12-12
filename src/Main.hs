@@ -114,7 +114,7 @@ loop db = do
     else do
       case parseQueryEither line of
         Left err -> do
-          putStrLn "Error parsing query"
+          putStrLn ("Error parsing query: " ++ show err)
           loop db
         Right q -> case q of
           SELECT tr -> do

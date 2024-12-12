@@ -450,8 +450,15 @@ queryParser :: Parser Query
 queryParser = P.choice [selectParser, insertParser, createParser]
   where
     selectParser = SELECT <$> tableResultParser
-    insertParser = INSERT <$> (caseInsensitiveStringP "INSERT INTO" *> (VariableName <$> wordP)) <*> P.option [] (parensP (P.sepBy1 (VariableName <$> wordP) (charP ','))) <*> tableResultParser
-    createParser = CREATE <$> (caseInsensitiveStringP "CREATE TABLE" *> (VariableName <$> wordP)) <*> parensP (P.sepBy1 newColParser (charP ','))
+    insertParser =
+      INSERT
+        <$> (caseInsensitiveStringP "INSERT INTO" *> (VariableName <$> wordP))
+        <*> P.option [] (parensP (P.sepBy1 (VariableName <$> wordP) (charP ',')))
+        <*> tableResultParser
+    createParser =
+      CREATE
+        <$> (caseInsensitiveStringP "CREATE TABLE" *> (VariableName <$> wordP))
+        <*> parensP (P.sepBy1 newColParser (charP ','))
       where
         newColParser = ((,) . VariableName <$> wordP) <*> colTypeParser
     updateParser = undefined
@@ -467,18 +474,31 @@ tableResultParser = P.choice [basicSelectParser, valueTableParser]
         <*> P.optionMaybe (caseInsensitiveStringP "WHERE" *> expressionParser)
         <*> P.option [] (caseInsensitiveStringP "ORDER BY" *> P.sepBy1 orderKeyParser (charP ','))
         <*> P.optionMaybe (caseInsensitiveStringP "LIMIT" *> intP)
-    valueTableParser = ValueTable <$> (caseInsensitiveStringP "VALUES" *> P.sepBy1 (parensP (P.sepBy1 valueParser (charP ','))) (charP ','))
+    valueTableParser =
+      ValueTable
+        <$> ( caseInsensitiveStringP "VALUES"
+                *> P.sepBy1 (parensP (P.sepBy1 valueParser (charP ','))) (charP ',')
+            )
     unionParser = undefined
     intersectParser = undefined
     exceptParser = undefined
 
 colTypeParser :: Parser ColType
-colTypeParser = P.choice [caseInsensitiveStringP "INT" >> return IntType, caseInsensitiveStringP "DOUBLE" >> return DoubleType, caseInsensitiveStringP "BOOL" >> return BoolType, caseInsensitiveStringP "STRING" >> return StringType]
+colTypeParser =
+  P.choice
+    [ caseInsensitiveStringP "INT" >> return IntType,
+      caseInsensitiveStringP "DOUBLE" >> return DoubleType,
+      caseInsensitiveStringP "BOOL" >> return BoolType,
+      caseInsensitiveStringP "STRING" >> return StringType
+    ]
 
 aliasParser :: Parser a -> Parser (Aliased a)
 aliasParser p = do
   val <- valueParser
-  Aliased <$> P.optionMaybe (caseInsensitiveStringP "AS" *> (VariableName <$> wordP)) <*> pure val
+  Aliased
+    <$> P.optionMaybe
+      (caseInsensitiveStringP "AS" *> (VariableName <$> wordP))
+    <*> pure val
   where
     valueParser = P.choice [P.try $ parensP p, p]
 
@@ -517,7 +537,12 @@ prop_orderKeyParser o = P.parse orderKeyParser "" (prettyPrint o) == Right o
 intermediaryTableParser :: Parser IntermediaryTable
 intermediaryTableParser = makeJoinParser simpleTableParser
   where
-    simpleTableParser = P.choice [Table <$> aliasParser (VariableName <$> wordP), TableResult <$> aliasParser (P.try $ parensP tableResultParser), parensP intermediaryTableParser]
+    simpleTableParser =
+      P.choice
+        [ Table <$> aliasParser (VariableName <$> wordP),
+          TableResult <$> aliasParser (P.try $ parensP tableResultParser),
+          parensP intermediaryTableParser
+        ]
     makeJoinParser :: Parser IntermediaryTable -> Parser IntermediaryTable
     makeJoinParser leftParser = do
       left <- leftParser
