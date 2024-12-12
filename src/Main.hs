@@ -5,7 +5,7 @@ module Main where
 import Control.Monad (forever)
 import Data.List (intercalate)
 import Database (Database (..), Row (..), createTable, emptyDatabase, executeQuery, insertRow)
-import Query (Query (..), TableResult (..), Value (..), VariableName (..), parseQuery, prettyPrint)
+import Query (Query (..), TableResult (..), Value (..), VariableName (..), parseQuery, parseQueryEither, prettyPrint)
 import System.IO (hFlush, stdout)
 
 main :: IO ()
@@ -112,20 +112,23 @@ loop db = do
       putStrLn "Goodbye!"
       return ()
     else do
-      let q = parseQuery line
-      case q of
-        SELECT tr -> do
-          let (dbAfter, rows) = executeQuery q db
-          printRows rows
-          loop dbAfter
-        CREATE {} -> do
-          let (dbAfter, _) = executeQuery q db
-          putStrLn "Table created."
-          loop dbAfter
-        INSERT {} -> do
-          let (dbAfter, _) = executeQuery q db
-          putStrLn "Rows inserted."
-          loop dbAfter
+      case parseQueryEither line of
+        Left err -> do
+          putStrLn "Error parsing query"
+          loop db
+        Right q -> case q of
+          SELECT tr -> do
+            let (dbAfter, rows) = executeQuery q db
+            printRows rows
+            loop dbAfter
+          CREATE {} -> do
+            let (dbAfter, _) = executeQuery q db
+            putStrLn "Table created."
+            loop dbAfter
+          INSERT {} -> do
+            let (dbAfter, _) = executeQuery q db
+            putStrLn "Rows inserted."
+            loop dbAfter
 
 -- A helper function to print rows in a table format
 printRows :: [Row] -> IO ()
