@@ -12,7 +12,7 @@ data BTreeNode k v = BTreeNode
   { entries :: [(k, v)],
     children :: [BTreeNode k v]
   }
-  deriving (Show, Generic)
+  deriving (Show, Generic, Eq)
 
 instance (S.Serialize k, S.Serialize v) => S.Serialize (BTreeNode k v)
 
@@ -20,7 +20,7 @@ data BTree k v = BTree
   { t :: Int,
     root :: BTreeNode k v
   }
-  deriving (Show, Generic)
+  deriving (Show, Generic, Eq)
 
 instance (S.Serialize k, S.Serialize v) => S.Serialize (BTree k v)
 
@@ -446,10 +446,10 @@ unitTests =
 -- QUICKCHECK PROPERTIES
 prop_insertSearch :: [Int] -> Property
 prop_insertSearch xs =
-  not (null xs)
-    ==> let keys = nub xs
-            bt = insertMany tVal (map (\x -> (x, show x)) keys) (emptyBTree tVal)
-         in all (\k -> searchBTree bt k == Just (show k)) keys
+  not (null xs) ==>
+    let keys = nub xs
+        bt = insertMany tVal (map (\x -> (x, show x)) keys) (emptyBTree tVal)
+     in all (\k -> searchBTree bt k == Just (show k)) keys
 
 prop_insertOrdered :: [Int] -> Bool
 prop_insertOrdered xs =
