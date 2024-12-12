@@ -203,8 +203,6 @@ executeQuery (INSERT tbl insertCols tResult) db =
   let insertedRows = executeTableResult tResult db
       Just table = lookup tbl (dbTables db)
       pkName = dbPrimaryKeyName table
-
-      -- Modified code begins here:
       finalRows =
         map
           ( \r ->
