@@ -273,6 +273,31 @@ insertMany t ((k, v) : rest) bt = insertMany t rest (insertBTree k v bt)
 deleteMany :: (Ord k, Eq v) => [k] -> BTree k v -> BTree k v
 deleteMany ks bt = foldl (flip deleteBTree) bt ks
 
+isSorted :: (Ord k) => [(k, v)] -> Bool
+isSorted [] = True
+isSorted [_] = True
+isSorted ((k1, _) : (k2, v2) : rest) = k1 < k2 && isSorted ((k2, v2) : rest)
+
+inOrderTraversal :: BTreeNode k v -> [k]
+inOrderTraversal (BTreeNode es cs)
+  | null cs = map fst es
+  | otherwise = concat (zipWith (\c e -> inOrderTraversal c ++ [fst e]) cs es) ++ inOrderTraversal (last cs)
+
+allLeavesSameDepth :: BTreeNode k v -> Bool
+allLeavesSameDepth node = case getDepths node 0 of
+  [] -> True
+  ds -> all (== head ds) ds
+  where
+    getDepths :: BTreeNode k v -> Int -> [Int]
+    getDepths (BTreeNode es cs) depth
+      | null cs = [depth]
+      | otherwise = concatMap (\c -> getDepths c (depth + 1)) cs
+
+computeHeight :: BTreeNode k v -> Int
+computeHeight (BTreeNode _ cs)
+  | null cs = 1
+  | otherwise = 1 + computeHeight (head cs)
+
 tVal :: Int
 tVal = 2
 
@@ -464,11 +489,78 @@ prop_insertReverse xs =
       bt = insertMany tVal (map (\x -> (x, show x)) revKeys) (emptyBTree tVal)
    in all (\k -> searchBTree bt k == Just (show k)) sortedKeys
 
+-- inorder Traversal is sorted
+prop_inOrderTraversalSorted :: [Int] -> Property
+prop_inOrderTraversalSorted xs =
+  not (null xs) && length (nub xs) == length xs ==>
+    let keys = sort (nub xs)
+        bt = insertMany tVal (map (\x -> (x, show x)) keys) (emptyBTree tVal)
+        traversal = inOrderTraversal (root bt)
+     in traversal == keys
+
+prop_noDuplicateKeys :: [Int] -> Property
+prop_noDuplicateKeys xs =
+  not (null xs) ==>
+    let keys = nub xs
+        bt = insertMany tVal (map (\x -> (x, show x)) keys) (emptyBTree tVal)
+        allKeys = inOrderTraversal (root bt)
+     in length allKeys == length keys
+
+prop_allInsertedKeysPresent :: [Int] -> Property
+prop_allInsertedKeysPresent xs =
+  not (null xs) ==>
+    let keys = nub xs
+        bt = insertMany tVal (map (\x -> (x, show x)) keys) (emptyBTree tVal)
+     in all (\k -> searchBTree bt k == Just (show k)) keys
+
+-- check tree height its <= log_t(n)
+prop_treeHeightWithinBounds :: [Int] -> Property
+prop_treeHeightWithinBounds xs =
+  not (null xs) ==>
+    let keys = nub xs
+        n = length keys
+        bt = insertMany tVal (map (\x -> (x, show x)) keys) (emptyBTree tVal)
+        height = computeHeight (root bt)
+        maxHeight = ceiling (logBase (fromIntegral tVal) (fromIntegral (n + 1)))
+     in height <= maxHeight
+
+-- size consistency
+prop_sizeConsistency :: [Int] -> Bool
+prop_sizeConsistency xs =
+  let keys = nub xs
+      bt = insertMany tVal (map (\x -> (x, show x)) keys) (emptyBTree tVal)
+      n = length keys
+      inTree = inOrderTraversal (root bt)
+   in length inTree == n
+
+-- all leaves at same depth
+prop_allLeavesSameDepth :: [Int] -> Property
+prop_allLeavesSameDepth xs =
+  not (null xs) ==>
+    let keys = nub xs
+        bt = insertMany tVal (map (\x -> (x, show x)) keys) (emptyBTree tVal)
+     in allLeavesSameDepth (root bt)
+
 runAllTests :: IO ()
 runAllTests = do
   putStrLn "Running unit tests"
   _ <- runTestTT unitTests
   putStrLn "\nRunning QC properties"
+  putStrLn "Running prop_insertSearch"
   QC.quickCheck prop_insertSearch
+  putStrLn "Running prop_insertOrdered"
   QC.quickCheck prop_insertOrdered
+  putStrLn "Running prop_insertReverse"
   QC.quickCheck prop_insertReverse
+  putStrLn "Running prop_inOrderTraversalSorted"
+  QC.quickCheck prop_inOrderTraversalSorted
+  putStrLn "Running prop_noDuplicateKeys"
+  QC.quickCheck prop_noDuplicateKeys
+  putStrLn "Running prop_allInsertedKeysPresent"
+  QC.quickCheck prop_allInsertedKeysPresent
+  putStrLn "Running prop_treeHeightWithinBounds"
+  QC.quickCheck prop_treeHeightWithinBounds
+  putStrLn "Running prop_sizeConsistency"
+  QC.quickCheck prop_sizeConsistency
+  putStrLn "Running prop_allLeavesSameDepth"
+  QC.quickCheck prop_allLeavesSameDepth
