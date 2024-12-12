@@ -92,6 +92,22 @@ data Value
   | StringVal String -- "abd"
   deriving (Show, Eq)
 
+data ColType
+  = IntType
+  | DoubleType
+  | BoolType
+  | StringType
+  deriving (Show, Eq, Enum, Bounded)
+
+instance Arbitrary ColType where
+  arbitrary = QC.elements [minBound .. maxBound]
+
+instance Pretty ColType where
+  prettyPrint IntType = "int"
+  prettyPrint DoubleType = "double"
+  prettyPrint BoolType = "bool"
+  prettyPrint StringType = "string"
+
 instance Arbitrary Value where
   arbitrary = QC.oneof [pure NilVal, IntVal <$> arbitrary, DoubleVal <$> arbitrary, BoolVal <$> arbitrary, StringVal <$> safeString]
     where
@@ -164,8 +180,8 @@ instance (Arbitrary a) => Arbitrary (Aliased a) where
     lst -> Aliased n <$> lst
 
 instance (Pretty a) => Pretty (Aliased a) where
-  prettyPrint (Aliased Nothing v) = prettyPrint v
-  prettyPrint (Aliased (Just n) v) = prettyPrint v ++ " AS " ++ prettyPrint n
+  prettyPrint (Aliased Nothing v) = "(" ++ prettyPrint v ++ ")"
+  prettyPrint (Aliased (Just n) v) = "(" ++ prettyPrint v ++ ")" ++ " AS " ++ prettyPrint n
 
 data ColumnName = ColumnName {tableName :: Maybe VariableName, columnName :: VariableName}
   deriving (Show, Eq)
@@ -261,12 +277,13 @@ instance Pretty IntermediaryTable where
 
 data TableResult
   = BasicSelect
-  { select :: Columns,
-    from :: IntermediaryTable,
-    whre :: Maybe Expression,
-    orderBy :: [OrderKey],
-    limit :: Maybe Int
-  }
+      { select :: Columns,
+        from :: IntermediaryTable,
+        whre :: Maybe Expression,
+        orderBy :: [OrderKey],
+        limit :: Maybe Int
+      }
+  | ValueTable [[Value]]
   {-
   -- | Union (TableResult, TableResult)
   -- | Intersect (TableResult, TableResult)
@@ -275,7 +292,11 @@ data TableResult
   deriving (Show, Eq)
 
 instance Arbitrary TableResult where
-  arbitrary = BasicSelect <$> arbitrary <*> arbitrary <*> arbitrary <*> arbitrary <*> arbitrary
+  arbitrary = QC.oneof [arbBasicTable, arbValueTable]
+    where
+      arbBasicTable = BasicSelect <$> arbitrary <*> arbitrary <*> arbitrary <*> arbitrary <*> arbitrary
+      arbValueTable = ValueTable <$> QC.listOf1 (QC.listOf1 arbitrary)
+
   shrink (BasicSelect s f w o l) = case shrink s of
     [] -> case shrink f of
       [] -> case shrink w of
@@ -285,32 +306,68 @@ instance Arbitrary TableResult where
         w' -> BasicSelect s f <$> w' <*> pure o <*> pure l
       f' -> BasicSelect s <$> f' <*> pure w <*> pure o <*> pure l
     s' -> BasicSelect <$> s' <*> pure f <*> pure w <*> pure o <*> pure l
+  shrink (ValueTable v) = ValueTable <$> shrink v
 
 instance Pretty TableResult where
   prettyPrint (BasicSelect s f w o l) =
-    "("
-      ++ ("SELECT " ++ prettyPrint s)
+    ("SELECT " ++ prettyPrint s)
       ++ (" FROM " ++ prettyPrint f)
       ++ maybe "" ((" WHERE " ++) . prettyPrint) w
       ++ (if null o then "" else " ORDER BY " ++ List.intercalate ", " (prettyPrint <$> o))
       ++ maybe "" ((" LIMIT " ++) . show) l
-      ++ ")"
+  prettyPrint (ValueTable v) = "VALUES " ++ List.intercalate ", " (printRow <$> v)
+    where
+      printRow r = "(" ++ List.intercalate ", " (prettyPrint <$> r) ++ ")"
 
 data Query
   = SELECT TableResult
+  | INSERT
+      { insertTable :: VariableName,
+        insertColumns :: [VariableName],
+        toInsert :: TableResult
+      }
+  | CREATE
+      { createTable :: VariableName,
+        createColumns :: [(VariableName, ColType)]
+      }
   {-
-  -- | INSERT
   -- | UPDATE
   -- | DELETE
   -}
   deriving (Show, Eq)
 
 instance Arbitrary Query where
-  arbitrary = SELECT <$> arbitrary
+  arbitrary = QC.oneof [arbitrarySelect, arbitraryInsert, arbitraryCreate]
+    where
+      arbitrarySelect = SELECT <$> arbitrary
+      arbitraryInsert = INSERT <$> arbitrary <*> arbitrary <*> arbitrary
+      arbitraryCreate = CREATE <$> arbitrary <*> QC.listOf1 arbitrary
   shrink (SELECT t) = SELECT <$> shrink t
+  shrink (INSERT t c i) = INSERT <$> shrink t <*> shrink c <*> shrink i
+  shrink (CREATE t c) = CREATE <$> shrink t <*> pure c
 
 instance Pretty Query where
   prettyPrint (SELECT t) = prettyPrint t
+  prettyPrint (INSERT t c i) =
+    "INSERT INTO "
+      ++ prettyPrint t
+      ++ (if null c then " " else " (" ++ List.intercalate ", " (prettyPrint <$> c) ++ ") ")
+      ++ prettyPrint i
+  prettyPrint (CREATE t c) =
+    "CREATE TABLE "
+      ++ prettyPrint t
+      ++ " ("
+      ++ List.intercalate ", " (printCol <$> c)
+      ++ ")"
+    where
+      printCol (n, t) = prettyPrint n ++ " " ++ prettyPrint t
+
+-- TODO: I WAS HERE
+
+createQuery = CREATE (VariableName "table1") [(VariableName "a", IntType), (VariableName "b", StringType)]
+
+-- >>> prettyPrint createQuery
+-- "CREATE TABLE table1 (a int, b string)"
 
 type Parser a = P.Parsec String () a
 
@@ -319,7 +376,6 @@ caseInsensitiveStringP s = P.try (doIt <* P.spaces)
   where
     doIt = do
       chars <- P.count (length s) P.anyChar
-      -- P.lookAhead (P.satisfy isWordStopChar) *> pure () P.<|> P.eof
       P.choice [P.eof, P.lookAhead $ void (P.satisfy isWordStopChar)]
       if map Char.toLower chars == map Char.toLower s
         then return chars
@@ -392,16 +448,18 @@ sepBy2P p sep = P.try (doIt <* P.spaces)
       return (x : xs)
 
 queryParser :: Parser Query
-queryParser = selectParser
+queryParser = P.choice [selectParser, insertParser, createParser]
   where
     selectParser = SELECT <$> tableResultParser
-    insertParser = undefined
+    insertParser = INSERT <$> (caseInsensitiveStringP "INSERT INTO" *> (VariableName <$> wordP)) <*> P.option [] (parensP (P.sepBy1 (VariableName <$> wordP) (charP ','))) <*> tableResultParser
+    createParser = CREATE <$> (caseInsensitiveStringP "CREATE TABLE" *> (VariableName <$> wordP)) <*> parensP (P.sepBy1 newColParser (charP ','))
+      where
+        newColParser = ((,) . VariableName <$> wordP) <*> colTypeParser
     updateParser = undefined
     deleteParser = undefined
 
 tableResultParser :: Parser TableResult
--- tableResultParser = P.choice [basicSelectParser, unionParser, intersectParser, exceptParser]
-tableResultParser = P.choice [basicSelectParser, parensP tableResultParser]
+tableResultParser = P.choice [basicSelectParser, valueTableParser]
   where
     basicSelectParser =
       BasicSelect
@@ -410,14 +468,26 @@ tableResultParser = P.choice [basicSelectParser, parensP tableResultParser]
         <*> P.optionMaybe (caseInsensitiveStringP "WHERE" *> expressionParser)
         <*> P.option [] (caseInsensitiveStringP "ORDER BY" *> P.sepBy1 orderKeyParser (charP ','))
         <*> P.optionMaybe (caseInsensitiveStringP "LIMIT" *> intP)
+    valueTableParser = ValueTable <$> (caseInsensitiveStringP "VALUES" *> P.sepBy1 (parensP (P.sepBy1 valueParser (charP ','))) (charP ','))
     unionParser = undefined
     intersectParser = undefined
     exceptParser = undefined
 
+colTypeParser :: Parser ColType
+colTypeParser = P.choice [caseInsensitiveStringP "INT" >> return IntType, caseInsensitiveStringP "DOUBLE" >> return DoubleType, caseInsensitiveStringP "BOOL" >> return BoolType, caseInsensitiveStringP "STRING" >> return StringType]
+
 aliasParser :: Parser a -> Parser (Aliased a)
 aliasParser p = do
-  name <- p
-  Aliased <$> P.optionMaybe (caseInsensitiveStringP "AS" *> (VariableName <$> wordP)) <*> pure name
+  val <- valueParser
+  Aliased <$> P.optionMaybe (caseInsensitiveStringP "AS" *> (VariableName <$> wordP)) <*> pure val
+  where
+    valueParser = P.choice [P.try $ parensP p, p]
+
+prop_aliasParserExp :: Aliased Expression -> Bool
+prop_aliasParserExp a = P.parse (aliasParser expressionParser) "" (prettyPrint a) == Right a
+
+prop_aliasParserCol :: Aliased Columns -> Bool
+prop_aliasParserCol a = P.parse (aliasParser columnsParser) "" (prettyPrint a) == Right a
 
 columnsParser :: Parser Columns
 columnsParser = P.choice [allParser, regularParser]
@@ -463,18 +533,22 @@ intermediaryTableParser = makeJoinParser simpleTableParser
 prop_intermediaryTableParser :: IntermediaryTable -> Bool
 prop_intermediaryTableParser t = P.parse intermediaryTableParser "" (prettyPrint t) == Right t
 
+valueParser :: Parser Value
+valueParser = P.choice [nilParser, doubleParser, intParser, boolParser, stringParser]
+  where
+    nilParser = caseInsensitiveStringP "NULL" >> return NilVal
+    doubleParser = DoubleVal <$> doubleP
+    intParser = IntVal <$> intP
+    boolParser = BoolVal <$> P.choice [caseInsensitiveStringP "TRUE" >> return True, caseInsensitiveStringP "FALSE" >> return False]
+    stringParser = StringVal <$> P.between (P.char '"') (charP '"') (P.many (P.noneOf ['"']))
+
 expressionParser :: Parser Expression
 expressionParser = orParser
   where
-    simpleExpressionParser = P.choice [concatParser, notParser, lenParser, nilParser, doubleParser, intParser, boolParser, stringParser, columNameParser]
+    simpleExpressionParser = P.choice [concatParser, notParser, lenParser, Value <$> valueParser, columNameParser]
     concatParser = concatOfList <$> (caseInsensitiveStringP "CONCAT" *> parensP (sepBy2P expressionParser (charP ',')))
     notParser = UnaryOp Not <$> (caseInsensitiveStringP "NOT" *> parensP expressionParser)
     lenParser = UnaryOp Len <$> (caseInsensitiveStringP "LENGTH" *> parensP expressionParser)
-    nilParser = caseInsensitiveStringP "NULL" >> return (Value NilVal)
-    doubleParser = Value . DoubleVal <$> doubleP
-    intParser = Value . IntVal <$> intP
-    boolParser = Value . BoolVal <$> P.choice [caseInsensitiveStringP "TRUE" >> return True, caseInsensitiveStringP "FALSE" >> return False]
-    stringParser = Value . StringVal <$> P.between (P.char '"') (charP '"') (P.many (P.noneOf ['"']))
     columNameParser = do
       col <- wordP
       case elemIndex '.' col of
@@ -530,8 +604,78 @@ test_basic_select_complex =
       )
     ~?= parseQuery "SELECT name, grade, gpa FROM students WHERE grade > 12 AND gpa > 3.7 ORDER BY name DESC LIMIT 10"
 
--- >>> runTestTT $ TestList  [test_basic_select, test_basic_select_complex]
--- Counts {cases = 2, tried = 2, errors = 0, failures = 0}
+test_nested_select :: Test
+test_nested_select =
+  "Nested select"
+    ~: SELECT
+      ( BasicSelect
+          { select = Columns [Aliased {name = Nothing, value = Column (ColumnName {tableName = Nothing, columnName = VariableName "a"})}, Aliased {name = Nothing, value = Column (ColumnName {tableName = Nothing, columnName = VariableName "b"})}, Aliased {name = Nothing, value = Column (ColumnName {tableName = Nothing, columnName = VariableName "c"})}],
+            from =
+              Join
+                { left =
+                    Join
+                      { left = TableResult (Aliased {name = Just (VariableName "t1"), value = BasicSelect {select = AllColumns, from = Table (Aliased {name = Nothing, value = VariableName "X"}), whre = Nothing, orderBy = [], limit = Nothing}}),
+                        right = Table (Aliased {name = Just (VariableName "t2"), value = VariableName "table2"}),
+                        on = BinaryOp Eq (Column (ColumnName {tableName = Just (VariableName "t2"), columnName = VariableName "xyz"})) (Column (ColumnName {tableName = Just (VariableName "t1"), columnName = VariableName "xyz"}))
+                      },
+                  right = TableResult (Aliased {name = Nothing, value = BasicSelect {select = AllColumns, from = TableResult (Aliased {name = Nothing, value = BasicSelect {select = Columns [Aliased {name = Nothing, value = Column (ColumnName {tableName = Nothing, columnName = VariableName "a"})}], from = Table (Aliased {name = Nothing, value = VariableName "Y"}), whre = Nothing, orderBy = [], limit = Nothing}}), whre = Nothing, orderBy = [], limit = Nothing}}),
+                  on = BinaryOp Eq (Column (ColumnName {tableName = Nothing, columnName = VariableName "a"})) (Column (ColumnName {tableName = Just (VariableName "t1"), columnName = VariableName "xyz"}))
+                },
+            whre = Just (BinaryOp Eq (Column (ColumnName {tableName = Just (VariableName "t1"), columnName = VariableName "xyz"})) (Value (IntVal 123))),
+            orderBy = [Asc (Column (ColumnName {tableName = Nothing, columnName = VariableName "a"})), Asc (Column (ColumnName {tableName = Nothing, columnName = VariableName "b"}))],
+            limit = Nothing
+          }
+      )
+    ~?= parseQuery
+      "SELECT a, b, c\n\
+      \FROM (SELECT * FROM X) AS t1 \n\
+      \JOIN table2 AS t2 \n\
+      \ON t2.xyz = t1.xyz \n\
+      \JOIN (SELECT * FROM (SELECT a FROM Y))\n\
+      \ON a = t1.xyz \n\
+      \WHERE (t1.xyz=123)\n\
+      \ORDER BY a ASC, b DSC\n\
+      \LIMIT 100"
+
+test_value_table :: Test
+test_value_table =
+  "Value table"
+    ~: SELECT
+      ( ValueTable
+          [ [IntVal 1, IntVal 2],
+            [IntVal 3, IntVal 4]
+          ]
+      )
+    ~?= parseQuery "VALUES (1, 2), (3, 4)"
+
+test_insert_simple :: Test
+test_insert_simple =
+  "Simple insert"
+    ~: INSERT
+      (VariableName "table1")
+      [VariableName "a", VariableName "b"]
+      (ValueTable [[IntVal 1, IntVal 2], [IntVal 3, IntVal 4]])
+    ~?= parseQuery "INSERT INTO table1 (a, b) VALUES (1, 2), (3, 4)"
+
+test_insert_select_table :: Test
+test_insert_select_table =
+  "Insert select table"
+    ~: INSERT
+      (VariableName "table1")
+      [VariableName "a", VariableName "b"]
+      (BasicSelect {select = AllColumns, from = Table $ Aliased Nothing (VariableName "table2"), whre = Nothing, orderBy = [], limit = Nothing})
+    ~?= parseQuery "INSERT INTO table1 (a, b) SELECT * FROM table2"
+
+test_create_table :: Test
+test_create_table =
+  "Create table"
+    ~: CREATE
+      (VariableName "table1")
+      [(VariableName "a", IntType), (VariableName "b", StringType)]
+    ~?= parseQuery "CREATE TABLE table1 (a int, b string)"
+
+-- >>> runTestTT $ TestList [test_basic_select, test_basic_select_complex, test_nested_select, test_value_table, test_insert_simple, test_insert_select_table, test_create_table]
+-- Counts {cases = 7, tried = 7, errors = 0, failures = 0}
 
 prop_roundTrip :: Query -> Bool
 prop_roundTrip q = parseQuery (prettyPrint q) == q
@@ -541,6 +685,10 @@ runAllTests = do
   putStrLn "Running unit tests"
   runTestTT $ TestList [test_basic_select, test_basic_select_complex]
   putStrLn "Running QuickCheck tests"
+  putStrLn "Testing Alias parsers"
+  QC.quickCheck prop_aliasParserExp
+  QC.quickCheck prop_aliasParserCol
+
   putStrLn "Testing Columns parser"
   QC.quickCheck prop_columnsParser
   putStrLn "Testing OrderKey parser"
@@ -550,23 +698,6 @@ runAllTests = do
   putStrLn "Testing Expression parser"
   QC.quickCheck prop_expressionParser
   putStrLn "Testing round trip"
-  QC.quickCheck prop_roundTrip
+  QC.quickCheckWith QC.stdArgs {QC.maxSuccess = 500} prop_roundTrip
   putStrLn "All tests passed"
   return ()
-
--- >>> runAllTests
-
-query =
-  "SELECT a, b, c\n\
-  \FROM (SELECT * FROM X) AS t1 \n\
-  \JOIN table2 AS t2 \n\
-  \ON t2.xyz = t1.xyz \n\
-  \JOIN (SELECT * FROM (SELECT a FROM Y))\n\
-  \ON a = t1.xyz \n\
-  \WHERE (t1.xyz=123)\n\
-  \ORDER BY a ASC, b DSC\n\
-  \LIMIT 100"
-
-parsed = parseQuery query
-
--- parsed_as_query = prettyPrint
