@@ -1,352 +1,474 @@
 module BTree where
 
 import Data.ByteString qualified as BS
-import Data.List (nub)
+import Data.List (nub, sort)
 import Data.Serialize qualified as S
 import GHC.Generics (Generic)
-import System.Directory (createDirectoryIfMissing, doesFileExist)
-import Test.HUnit (Test (..), assert, assertEqual, runTestTT, (~:), (~?=))
-import Test.QuickCheck
+import Test.HUnit
+import Test.QuickCheck (Arbitrary (..), Gen, Property, (==>))
+import Test.QuickCheck qualified as QC
 
-data BTreeNode k v
-  = InternalNode
-      { keys :: [k],
-        children :: [BTreeNode k v]
-      }
-  | LeafNode
-      { keys :: [k],
-        values :: [v]
-      }
+data BTreeNode k v = BTreeNode
+  { entries :: [(k, v)],
+    children :: [BTreeNode k v]
+  }
   deriving (Show, Generic)
 
 instance (S.Serialize k, S.Serialize v) => S.Serialize (BTreeNode k v)
 
 data BTree k v = BTree
-  { t :: Int, -- min degree
+  { t :: Int,
     root :: BTreeNode k v
   }
   deriving (Show, Generic)
 
 instance (S.Serialize k, S.Serialize v) => S.Serialize (BTree k v)
 
--- | Search for a key in the B-Tree node; if leaf, returns Just value if found,
--- | otherwise descends to the appropriate child
-searchBTreeNode :: (Ord k) => k -> BTreeNode k v -> Maybe v
-searchBTreeNode key (LeafNode ks vs) =
-  lookup key (zip ks vs)
-searchBTreeNode k (InternalNode ks cs) =
-  case break (>= k) ks of
-    (_, []) -> searchBTreeNode k (last cs)
-    (left, x : _) ->
-      if k == x
-        then Nothing
-        else searchBTreeNode k (cs !! length left)
-
--- | top-level search
+-- SEARCH
 searchBTree :: (Ord k) => BTree k v -> k -> Maybe v
-searchBTree (BTree _ r) k = searchBTreeNode k r
+searchBTree (BTree _ r) k = searchNode k r
 
--- | Insert a key-value pair into the BTree; if root is full, split it before inserting
-insertBTree :: (Ord k) => k -> v -> BTree k v -> BTree k v
-insertBTree key value (BTree t rootNode)
-  | fullNode t rootNode =
-      let (midKey, leftNode, rightNode) = splitNode t rootNode
-          newRoot = InternalNode [midKey] [leftNode, rightNode]
-       in BTree t (insertNonFull t key value newRoot)
-  | otherwise =
-      BTree t (insertNonFull t key value rootNode)
-
--- | Insert into a node that is known to be non-full
-insertNonFull :: (Ord k) => Int -> k -> v -> BTreeNode k v -> BTreeNode k v
-insertNonFull tVal key value (LeafNode ks vs) =
-  case break (>= key) ks of
-    (left, x : right)
-      | x == key ->
-          let (leftVs, _ : rightVs) = splitAt (length left) vs
-           in LeafNode (left ++ (x : right)) (leftVs ++ (value : rightVs)) -- handle dupe
-    _ ->
-      let (leftKs, rightKs) = break (> key) ks
-          (leftVs, rightVs) = splitAt (length leftKs) vs
-       in LeafNode (leftKs ++ [key] ++ rightKs) (leftVs ++ [value] ++ rightVs)
-insertNonFull tVal key value (InternalNode ks cs) =
-  let idx = findChildIndex key ks
-      child = cs !! idx
-   in if fullNode tVal child
-        then
-          let (midKey, leftChild, rightChild) = splitNode tVal child
-              newKeys = insertKey midKey ks
-              newChildren = replaceChildPair cs idx leftChild rightChild
-              updatedNode = InternalNode newKeys newChildren
-              newIdx = if key < midKey then idx else idx + 1
-              updatedChildren = replaceSingleChild newChildren newIdx (insertNonFull tVal key value (newChildren !! newIdx))
-           in InternalNode newKeys updatedChildren
-        else
-          InternalNode ks (replaceSingleChild cs idx (insertNonFull tVal key value child))
-
--- | Delete a key from the BTree
-deleteBTree :: (Ord k) => k -> BTree k v -> BTree k v
-deleteBTree key (BTree t rootNode) =
-  let newRoot = deleteKey t key rootNode
-   in case newRoot of
-        InternalNode [] [c] -> BTree t c
-        other -> BTree t other
-
--- | Delete a key from a node
---   THIS IS SIMPLIFIED, BALANCING IS NOT OPTIMAL
---   If the node is a leaf, remove the key if present.
---   If the node is internal and the key is found here, find successor or predecessor and swap then delete from leaf
---   If the key is not found, descend into the correct child node; if a child has too few keys, fix (merge/borrow) before descending
-deleteKey :: (Ord k) => Int -> k -> BTreeNode k v -> BTreeNode k v
-deleteKey tVal key (LeafNode ks vs) =
-  case break (== key) ks of
-    (left, _ : right) ->
-      let (leftVs, _ : rightVs) = splitAt (length left) vs
-       in LeafNode (left ++ right) (leftVs ++ rightVs)
-    _ -> LeafNode ks vs
-deleteKey tVal key node@(InternalNode ks cs) =
-  case break (>= key) ks of
-    (left, x : right)
-      | x == key ->
-          -- key found in internal node, so replace with predecessor or successor
-          let idx = length left
-           in if isLeaf (cs !! idx)
-                then -- just remove from leaf child
-                  let LeafNode ksc vsc = deleteKey tVal key (cs !! idx)
-                   in InternalNode (left ++ right) (replaceSingleChild cs idx (LeafNode ksc vsc))
-                else
-                  -- replace with predecessor (max key in left subtree)
-                  let (predKey, predValue, newLeftSubtree) = getPredecessor (cs !! idx)
-                      -- delete predKey from that subtree
-                      newLeftSubtree' = deleteKey tVal predKey newLeftSubtree
-                      (rKs, rCs) = (left ++ (predKey : right), replaceSingleChild cs idx newLeftSubtree')
-                   in -- val does not reside in internal nodes, so no direct update needed
-                      InternalNode rKs rCs
-    (_, []) ->
-      -- key isn't in this node, go into last child
-      let lastChild = last cs
-          lastChild' = fixChildUnderflow tVal (deleteKey tVal key lastChild)
-       in InternalNode ks (init cs ++ [lastChild'])
-    (left, x : right) ->
-      -- key isn't equal to x, so must be in child at position length left
+searchNode :: (Ord k) => k -> BTreeNode k v -> Maybe v
+searchNode key (BTreeNode es cs) =
+  case break ((>= key) . fst) es of
+    (left, (xk, xv) : right) | xk == key -> Just xv
+    (left, (xk, xv) : right) ->
       let idx = length left
-          targetChild = cs !! idx
-          targetChild' = fixChildUnderflow tVal (deleteKey tVal key targetChild)
-       in InternalNode ks (replaceSingleChild cs idx targetChild')
+       in if null cs then Nothing else searchNode key (cs !! idx)
+    (_, []) ->
+      if null cs then Nothing else searchNode key (last cs)
 
--- | get predecessor key from a subtree (go to the rightmost leaf)
+-- INSERTION
+insertBTree :: (Ord k) => k -> v -> BTree k v -> BTree k v
+insertBTree key value (BTree deg rootNode)
+  | fullNode deg rootNode =
+      let (midKV, leftNode, rightNode) = splitNode deg rootNode
+          newRoot = BTreeNode [midKV] [leftNode, rightNode]
+       in BTree deg (insertNonFull deg key value newRoot)
+  | otherwise =
+      BTree deg (insertNonFull deg key value rootNode)
+
+insertNonFull :: (Ord k) => Int -> k -> v -> BTreeNode k v -> BTreeNode k v
+insertNonFull tVal key value node@(BTreeNode es cs)
+  | null cs =
+      -- leaf insert
+      let es' = insertEntry (key, value) es
+       in BTreeNode es' cs
+  | otherwise =
+      let idx = findChildIndex key es
+          child = cs !! idx
+       in if fullNode tVal child
+            then
+              let (midKV, leftChild, rightChild) = splitNode tVal child
+                  es' = insertEntry midKV es
+                  cs' = replaceChildPair cs idx leftChild rightChild
+                  newIdx = if key < fst midKV then idx else idx + 1
+               in BTreeNode es' (replaceSingleChild cs' newIdx (insertNonFull tVal key value (cs' !! newIdx)))
+            else
+              BTreeNode es (replaceSingleChild cs idx (insertNonFull tVal key value child))
+
+-- DELETION
+deleteBTree :: (Ord k, Eq v) => k -> BTree k v -> BTree k v
+deleteBTree key (BTree deg rootNode) =
+  let (newRoot, _) = deleteKey deg key rootNode
+   in case newRoot of
+        BTreeNode [] [c] -> BTree deg c
+        other -> BTree deg other
+
+deleteKey :: (Ord k, Eq v) => Int -> k -> BTreeNode k v -> (BTreeNode k v, Bool)
+deleteKey tVal key node@(BTreeNode es cs)
+  | null cs =
+      -- Leaf node deletion
+      case break ((== key) . fst) es of
+        (_, []) -> (node, False) -- key not found
+        (left, _match : right) -> (BTreeNode (left ++ right) cs, True)
+  | otherwise =
+      case break ((>= key) . fst) es of
+        (left, (xk, xv) : right)
+          | xk == key ->
+              let idx = length left
+                  leftChild = cs !! idx
+                  rightChild = cs !! (idx + 1)
+               in if null (children leftChild)
+                    then
+                      -- The left child is a leaf, so just get predecessor from there
+                      let (pk, pv, newLeftChild) = getPredecessor leftChild
+                          newEs = replaceAt idx (pk, pv) es
+                          newCs = replaceSingleChild cs idx newLeftChild
+                          (fixedNode, _) = fixUnderflow tVal (BTreeNode newEs newCs) idx
+                       in (fixedNode, True)
+                    else
+                      -- Before we call getPredecessor, ensure leftChild has at least t keys
+                      let (safeNode, _) = ensureSafeChild tVal (BTreeNode es cs) idx
+                          BTreeNode es2 cs2 = safeNode
+                          leftChild2 = cs2 !! idx
+                          (pk, pv, newLeftChild) = getPredecessor leftChild2
+                          newEs = replaceAt idx (pk, pv) es2
+                          newCs = replaceSingleChild cs2 idx newLeftChild
+                          (fixedNode, _) = fixUnderflow tVal (BTreeNode newEs newCs) idx
+                       in (fixedNode, True)
+        (_, []) ->
+          let lastIndex = length cs - 1
+              (child, didDel) = deleteKey tVal key (last cs)
+              newChildren = replaceSingleChild cs lastIndex child
+           in if didDel
+                then fixUnderflow tVal (BTreeNode es newChildren) lastIndex
+                else (node, False)
+        (left, (xk, xv) : right) ->
+          let idx = length left
+              (child, didDel) = deleteKey tVal key (cs !! idx)
+              newChildren = replaceSingleChild cs idx child
+           in if didDel
+                then fixUnderflow tVal (BTreeNode es newChildren) idx
+                else (node, False)
+
+-- ensure that the child at index idx of node has at least t keys, othewise borrow or merge from siblings
+ensureSafeChild :: (Ord k) => Int -> BTreeNode k v -> Int -> (BTreeNode k v, Bool)
+ensureSafeChild tVal node@(BTreeNode es cs) idx
+  | length (entries (cs !! idx)) >= tVal = (node, False) -- Already safe
+  | otherwise =
+      let leftSibling = if idx > 0 then Just (cs !! (idx - 1)) else Nothing
+          rightSibling = if idx < length cs - 1 then Just (cs !! (idx + 1)) else Nothing
+       in case (leftSibling, rightSibling) of
+            (Just l, _) | canBorrow tVal l -> (borrowFromLeft tVal idx node, True)
+            (_, Just r) | canBorrow tVal r -> (borrowFromRight tVal idx node, True)
+            (Just _, _) -> (mergeNodes tVal idx (idx - 1) node, True)
+            (_, Just _) -> (mergeNodes tVal idx idx node, True)
+            _ ->
+              if length cs == 1
+                then (head cs, True)
+                else error "ensureSafeChild: No siblings to borrow or merge from. Invalid B-tree structure."
+
+-- get the predecessor (largest key) from a subtree
 getPredecessor :: BTreeNode k v -> (k, v, BTreeNode k v)
-getPredecessor (LeafNode ks vs) =
-  let k' = last ks
-      v' = last vs
-      initKs = init ks
-      initVs = init vs
-   in (k', v', LeafNode initKs initVs)
-getPredecessor (InternalNode ks cs) =
-  getPredecessor (last cs)
+getPredecessor (BTreeNode es cs)
+  | null cs =
+      let (pk, pv) = last es
+       in (pk, pv, BTreeNode (init es) cs)
+  | otherwise =
+      let (pk, pv, newLastChild) = getPredecessor (last cs)
+       in (pk, pv, BTreeNode es (replaceAt (length cs - 1) newLastChild cs))
 
--- | check if node is leaf
+fixUnderflow :: (Ord k) => Int -> BTreeNode k v -> Int -> (BTreeNode k v, Bool)
+fixUnderflow tVal node@(BTreeNode es cs) idx
+  | not (nodeUnderflow tVal (cs !! idx)) = (node, True)
+  | otherwise =
+      let leftSibling = if idx > 0 then Just (cs !! (idx - 1)) else Nothing
+          rightSibling = if idx < length cs - 1 then Just (cs !! (idx + 1)) else Nothing
+       in case (leftSibling, rightSibling) of
+            (Just l, _)
+              | canBorrow tVal l ->
+                  (borrowFromLeft tVal idx node, True)
+            (_, Just r)
+              | canBorrow tVal r ->
+                  (borrowFromRight tVal idx node, True)
+            (Just _, _) ->
+              (mergeNodes tVal idx (idx - 1) node, True)
+            (_, Just _) ->
+              (mergeNodes tVal idx idx node, True)
+            _ -> (node, True)
+
+nodeUnderflow :: Int -> BTreeNode k v -> Bool
+nodeUnderflow tVal (BTreeNode es _) = length es < tVal - 1
+
+canBorrow :: Int -> BTreeNode k v -> Bool
+canBorrow tVal (BTreeNode es _) = length es >= tVal
+
+borrowFromLeft :: (Ord k) => Int -> Int -> BTreeNode k v -> BTreeNode k v
+borrowFromLeft _ 0 node = node
+borrowFromLeft tVal idx (BTreeNode es cs) =
+  let leftNode = cs !! (idx - 1)
+      targetNode = cs !! idx
+      (lk, lv) = last (entries leftNode)
+      midIndex = idx - 1
+      (midK, midV) = es !! midIndex
+      newLeftEntries = init (entries leftNode)
+      newEs = replaceAt midIndex (lk, lv) es
+      newTargetEntries = insertEntry (midK, midV) (entries targetNode)
+      newLeft = BTreeNode newLeftEntries (children leftNode)
+      newTarget = BTreeNode newTargetEntries (children targetNode)
+      newChildren = replaceAt (idx - 1) newLeft (replaceAt idx newTarget cs)
+   in BTreeNode newEs newChildren
+
+borrowFromRight :: (Ord k) => Int -> Int -> BTreeNode k v -> BTreeNode k v
+borrowFromRight tVal idx (BTreeNode es cs) =
+  let rightNode = cs !! (idx + 1)
+      targetNode = cs !! idx
+      (rk, rv) = head (entries rightNode)
+      (midK, midV) = es !! idx
+      newRightEntries = tail (entries rightNode)
+      newEs = replaceAt idx (rk, rv) es
+      newTargetEntries = insertEntry (midK, midV) (entries targetNode)
+      newRight = BTreeNode newRightEntries (children rightNode)
+      newTarget = BTreeNode newTargetEntries (children targetNode)
+      newChildren = replaceAt idx newTarget (replaceAt (idx + 1) newRight cs)
+   in BTreeNode newEs newChildren
+
+mergeNodes :: Int -> Int -> Int -> BTreeNode k v -> BTreeNode k v
+mergeNodes tVal idx leftIdx (BTreeNode es cs) =
+  let leftNode = cs !! leftIdx
+      rightNode = cs !! (leftIdx + 1)
+      (mk, mv) = es !! leftIdx
+      newEs = removeAt leftIdx es
+      newChildren = removeAt (leftIdx + 1) cs
+      mergedEntries = entries leftNode ++ [(mk, mv)] ++ entries rightNode
+      mergedNode = BTreeNode mergedEntries (children leftNode ++ children rightNode)
+      finalChildren = replaceAt leftIdx mergedNode newChildren
+   in BTreeNode newEs finalChildren
+
+-- UTILITY FUNCTIONS
+removeAt :: Int -> [a] -> [a]
+removeAt i xs = take i xs ++ drop (i + 1) xs
+
+replaceAt :: Int -> a -> [a] -> [a]
+replaceAt i x xs = take i xs ++ [x] ++ drop (i + 1) xs
+
 isLeaf :: BTreeNode k v -> Bool
-isLeaf (LeafNode _ _) = True
-isLeaf _ = False
+isLeaf (BTreeNode _ cs) = null cs
 
--- TODO: Start of Arman added functions:
+-- find the child index to descend into
+findChildIndex :: (Ord k) => k -> [(k, v)] -> Int
+findChildIndex key es = length (takeWhile ((< key) . fst) es)
 
--- | Get all keys in the B-tree in sorted order
-getAllKeys :: (Ord k) => BTree k v -> [k]
-getAllKeys (BTree _ root) = getAllKeysNode root
+fullNode :: Int -> BTreeNode k v -> Bool
+fullNode tVal (BTreeNode es _) = length es == 2 * tVal - 1
 
--- | Helper function to get all keys from a node
-getAllKeysNode :: (Ord k) => BTreeNode k v -> [k]
-getAllKeysNode (LeafNode ks _) = ks
-getAllKeysNode (InternalNode ks cs) =
-  -- Get keys from first child
-  let firstKeys = getAllKeysNode (head cs)
-      -- Pair remaining children with keys
-      restKeys = concat $ zipWith (\k c -> [k] ++ getAllKeysNode c) ks (tail cs)
-   in firstKeys ++ restKeys
+splitNode :: Int -> BTreeNode k v -> ((k, v), BTreeNode k v, BTreeNode k v)
+splitNode tVal (BTreeNode es cs) =
+  let mid = tVal - 1
+      midKV = es !! mid
+      (leftEs, rightEs) = splitAt mid es
+      rightEs' = tail rightEs
+      (leftCs, rightCs) =
+        if null cs
+          then ([], [])
+          else splitAt tVal cs
+      leftNode = BTreeNode leftEs leftCs
+      rightNode = BTreeNode rightEs' rightCs
+   in (midKV, leftNode, rightNode)
 
--- TODO: End of Arman added functions
+-- insert an entry in sorted order by k
+insertEntry :: (Ord k) => (k, v) -> [(k, v)] -> [(k, v)]
+insertEntry (k, v) [] = [(k, v)]
+insertEntry (k, v) ((k', v') : rest)
+  | k == k' = (k, v) : rest -- replace if same key
+  | k < k' = (k, v) : (k', v') : rest
+  | otherwise = (k', v') : insertEntry (k, v) rest
 
--- | Fix child underflow if needed.
--- TODO: impl
-fixChildUnderflow :: Int -> BTreeNode k v -> BTreeNode k v
-fixChildUnderflow _ node = node
-
--- | find the child index to descend into during insert/search
-findChildIndex :: (Ord k) => k -> [k] -> Int
-findChildIndex key ks = length (takeWhile (< key) ks)
-
--- | insert a key into a sorted list of keys
-insertKey :: (Ord k) => k -> [k] -> [k]
-insertKey key ks =
-  let (left, right) = break (> key) ks
-   in left ++ [key] ++ right
-
--- | replace a single child at idx with one new child node
-replaceSingleChild :: [BTreeNode k v] -> Int -> BTreeNode k v -> [BTreeNode k v]
-replaceSingleChild cs idx newChild = take idx cs ++ [newChild] ++ drop (idx + 1) cs
-
--- | replace a child at idx with two children
+-- replace the pair of children at idx with two children
 replaceChildPair :: [BTreeNode k v] -> Int -> BTreeNode k v -> BTreeNode k v -> [BTreeNode k v]
 replaceChildPair cs idx left right = take idx cs ++ [left, right] ++ drop (idx + 1) cs
 
--- | check if node is full
-fullNode :: Int -> BTreeNode k v -> Bool
-fullNode tVal (LeafNode ks _) = length ks == 2 * tVal - 1
-fullNode tVal (InternalNode ks _) = length ks == 2 * tVal - 1
+replaceSingleChild :: [BTreeNode k v] -> Int -> BTreeNode k v -> [BTreeNode k v]
+replaceSingleChild cs idx newChild = take idx cs ++ [newChild] ++ drop (idx + 1) cs
 
--- | split full node into two nodes and promote the median key
-splitNode :: Int -> BTreeNode k v -> (k, BTreeNode k v, BTreeNode k v)
-splitNode tVal (LeafNode ks vs) =
-  let mid = tVal - 1
-      midKey = ks !! mid
-      (leftKs, rightKs) = splitAt mid ks
-      (leftVs, rightVs) = splitAt mid vs
-      rightKs' = drop 1 rightKs
-      rightVs' = drop 1 rightVs
-      leftNode = LeafNode leftKs leftVs
-      rightNode = LeafNode rightKs' rightVs'
-   in (midKey, leftNode, rightNode)
-splitNode tVal (InternalNode ks cs) =
-  let mid = tVal - 1
-      midKey = ks !! mid
-      (leftKs, rightKs) = splitAt mid ks
-      rightKs' = drop 1 rightKs
-      (leftCs, rightCs) = splitAt (mid + 1) cs
-      leftNode = InternalNode leftKs leftCs
-      rightNode = InternalNode rightKs' rightCs
-   in (midKey, leftNode, rightNode)
+-- TEST HELPERS
+emptyBTree :: Int -> BTree Int String
+emptyBTree minDegree = BTree minDegree (BTreeNode [] [])
 
--- | Save the entire BTree to a file
-saveBTree :: (S.Serialize k, S.Serialize v) => FilePath -> BTree k v -> IO ()
-saveBTree fp bt = do
-  let bs = S.encode bt
-  BS.writeFile fp bs
+insertMany :: (Ord k) => Int -> [(k, v)] -> BTree k v -> BTree k v
+insertMany _ [] bt = bt
+insertMany t ((k, v) : rest) bt = insertMany t rest (insertBTree k v bt)
 
--- | load the entire BTree from a file; if the file doesn't exist, create an empty tree
-loadBTree ::
-  forall k v.
-  (S.Serialize k, S.Serialize v, Ord k) =>
-  FilePath ->
-  Int ->
-  IO (BTree k v)
-loadBTree fp config = do
-  exists <- doesFileExist fp
-  if exists
-    then do
-      bs <- BS.readFile fp
-      case S.decode bs of
-        Left err -> error ("Failed to decode BTree file: " ++ err)
-        Right bt -> return bt
-    else do
-      let emptyTree = BTree config (LeafNode [] []) :: BTree k v
-      saveBTree fp emptyTree
-      return emptyTree
+deleteMany :: (Ord k, Eq v) => [k] -> BTree k v -> BTree k v
+deleteMany ks bt = foldl (flip deleteBTree) bt ks
 
--- tests
+tVal :: Int
+tVal = 2
 
-emptyBTree :: Int -> BTree k v
-emptyBTree t = BTree t (LeafNode [] [])
+-- UNIT TESTS
+testEmptyTreeSearch :: Test
+testEmptyTreeSearch = TestCase $ do
+  let bt = emptyBTree tVal
+  assertEqual "Search in empty tree should return Nothing" Nothing (searchBTree bt 10)
 
--- Insert a key-value pair into a B-Tree
-insert :: (Ord k) => (k, v) -> BTree k v -> BTree k v
-insert (k, v) bt = insertBTree k v bt
+testInsertSingleElement :: Test
+testInsertSingleElement = TestCase $ do
+  let bt = insertBTree 10 "ten" (emptyBTree tVal)
+  assertEqual "Insert single elt and search for it" (Just "ten") (searchBTree bt 10)
 
--- Lookup a value by key from a B-Tree
-lookupValue :: (Ord k) => k -> BTree k v -> Maybe v
-lookupValue k bt = searchBTree bt k
+testInsertTwoElements :: Test
+testInsertTwoElements = TestCase $ do
+  let bt = insertBTree 10 "ten" (emptyBTree tVal)
+      bt2 = insertBTree 20 "twenty" bt
+  assertEqual "Insert two elts and search for second one" (Just "twenty") (searchBTree bt2 20)
 
--- Create a sample B-Tree
-createSampleBTree :: BTree Int String
-createSampleBTree =
-  let initial = emptyBTree 2
-      inserts =
-        [ (10, "Value10"),
-          (20, "Value20"),
-          (5, "Value5"),
-          (6, "Value6"),
-          (12, "Value12"),
-          (30, "Value30"),
-          (7, "Value7"),
-          (17, "Value17")
-        ]
-   in foldr insert initial inserts
+testInsertMultipleElements :: Test
+testInsertMultipleElements = TestCase $ do
+  let keys = [0 .. 5]
+      vals = map show keys
+      bt = insertMany tVal (zip keys vals) (emptyBTree tVal)
+  mapM_ (\k -> assertEqual ("Inserted key: " ++ show k) (Just (show k)) (searchBTree bt k)) keys
 
-testInsert :: Test
-testInsert = TestCase $ do
-  let bt = insert (15, "Value15") (emptyBTree 2)
-  let result = lookupValue 15 bt
-  assertEqual "Insert and lookup key 15" (Just "Value15") result
+testSearchNonExistingKey :: Test
+testSearchNonExistingKey = TestCase $ do
+  let keys = [0 .. 5]
+      vals = map show keys
+      bt = insertMany tVal (zip keys vals) (emptyBTree tVal)
+  assertEqual "Search for a non-existing key should return Nothing" Nothing (searchBTree bt 100)
 
--- >>> runTestTT testInsert
--- Counts {cases = 1, tried = 1, errors = 0, failures = 0}
+testDeleteExistingKey :: Test
+testDeleteExistingKey = TestCase $ do
+  let keys = [0 .. 5]
+      vals = map show keys
+      bt = insertMany tVal (zip keys vals) (emptyBTree tVal)
+      btDel = deleteBTree 3 bt
+  assertEqual "Delete an existing key and ensure its removed" Nothing (searchBTree btDel 3)
 
-testLookup :: Test
-testLookup = TestCase $ do
-  let bt = createSampleBTree
-  let result1 = lookupValue 6 bt
-  let result2 = lookupValue 15 bt
-  assertEqual "Lookup eximsting key 6" (Just "Value6") result1
-  assertEqual "Lookup non-existing key 15" Nothing result2
+testDeleteNonExistingKey :: Test
+testDeleteNonExistingKey = TestCase $ do
+  let keys = [0 .. 5]
+      vals = map show keys
+      bt = insertMany tVal (zip keys vals) (emptyBTree tVal)
+      btDel = deleteBTree 999 bt
+  -- Deleting non-existing key should not affect other keys
+  assertEqual "Deleting a non-existing key should not affect existing keys" (Just "0") (searchBTree btDel 0)
 
--- >>> runTestTT testLookup
--- Counts {cases = 1, tried = 1, errors = 0, failures = 0}
+testSplitRootOnInsert :: Test
+testSplitRootOnInsert = TestCase $ do
+  let keys = [1, 2, 3]
+      bt = insertMany tVal (map (\x -> (x, show x)) keys) (emptyBTree tVal)
+      bt2 = insertBTree 4 "4" bt
+  mapM_ (\k -> assertEqual ("After splitting root, check inserted key: " ++ show k) (Just (show k)) (searchBTree bt2 k)) (keys ++ [4])
 
---------------------------------------------------------------------------------
--- QuickCheck Properties
---------------------------------------------------------------------------------
+testInsertReversedOrder :: Test
+testInsertReversedOrder = TestCase $ do
+  let keys = [50, 40, 30, 20, 10]
+      bt = insertMany tVal (map (\x -> (x, show x)) keys) (emptyBTree tVal)
+  mapM_ (\k -> assertEqual ("Inserted key: " ++ show k) (Just (show k)) (searchBTree bt k)) keys
 
--- insert then lookup should return the value inserted
-prop_insertLookup :: Int -> String -> Bool
-prop_insertLookup k v =
-  let bt = insert (k, v) (emptyBTree 2)
-   in lookupValue k bt == Just v
+testDeleteFromMultiSplitTree :: Test
+testDeleteFromMultiSplitTree = TestCase $ do
+  let keys = [10, 20, 5, 6, 12, 30, 7, 17]
+      bt = insertMany tVal (map (\x -> (x, show x)) keys) (emptyBTree tVal)
+      btDel = deleteBTree 6 bt
+  assertEqual "Delete key 6 and ensure its removed" Nothing (searchBTree btDel 6)
+  assertEqual "Ensure other keys remain after deletion" (Just "7") (searchBTree btDel 7)
 
--- insert then deleting a value should return nothing
-prop_insertDeleteLookup :: Int -> String -> Bool
-prop_insertDeleteLookup k v =
-  let bt = insert (k, v) (emptyBTree 2)
-      bt' = deleteBTree k bt
-   in lookupValue k bt' == Nothing
+testRootBecomesEmptyAfterDeletion :: Test
+testRootBecomesEmptyAfterDeletion = TestCase $ do
+  let bt = insertBTree 42 "fortytwo" (emptyBTree tVal)
+      btDel = deleteBTree 42 bt
+  assertEqual "After deleting the only key, tree should be empty" Nothing (searchBTree btDel 42)
 
--- inserting a key twice should update the value
-prop_duplicateKeyUpdate :: Int -> String -> String -> Bool
-prop_duplicateKeyUpdate k v1 v2 =
-  let bt = insert (k, v1) (emptyBTree 2)
-      bt' = insert (k, v2) bt
-   in lookupValue k bt' == Just v2
+testUpdateDuplicateKey :: Test
+testUpdateDuplicateKey = TestCase $ do
+  let bt = insertBTree 10 "first" (emptyBTree tVal)
+      bt2 = insertBTree 10 "second" bt
+  assertEqual "Inserting a duplicate key should update its value" (Just "second") (searchBTree bt2 10)
 
--- deleting a non-existing key should return nothing for that key
-prop_deleteNonExistingKey :: Int -> Bool
-prop_deleteNonExistingKey k =
-  let bt = deleteBTree k (emptyBTree 2 :: BTree Int String)
-   in lookupValue k bt == Nothing
+testInsertAscendingOrder :: Test
+testInsertAscendingOrder = TestCase $ do
+  let keys = [1 .. 20]
+      bt = insertMany tVal (map (\x -> (x, show x)) keys) (emptyBTree tVal)
+  mapM_ (\k -> assertEqual ("Check ascending key " ++ show k) (Just (show k)) (searchBTree bt k)) keys
 
--- multiple inserts and lookups
-prop_multipleInsertLookup :: [(Int, String)] -> Property
-prop_multipleInsertLookup kvs =
-  let uniqueKvs = nub kvs
-      bt = foldr insert (emptyBTree 2) uniqueKvs
-      results = map (\(k, _) -> lookupValue k bt) uniqueKvs
-      expected = map (Just . snd) uniqueKvs
-   in length kvs == length uniqueKvs ==> results == expected
+testInsertDescendingOrder :: Test
+testInsertDescendingOrder = TestCase $ do
+  let keys = [20, 19 .. 1]
+      bt = insertMany tVal (map (\x -> (x, show x)) keys) (emptyBTree tVal)
+  mapM_ (\k -> assertEqual ("Check descending key " ++ show k) (Just (show k)) (searchBTree bt k)) [1 .. 20]
 
--- adding an element does not delete others
-prop_addElementDoesNotDeleteOthers :: [(Int, String)] -> (Int, String) -> Property
-prop_addElementDoesNotDeleteOthers initialElements newElement =
-  let uniqueInitialElements = nub initialElements
-      btInitial = foldr insert (emptyBTree 2) uniqueInitialElements
-      btFinal = insert newElement btInitial
-      results = map (\(k, _) -> lookupValue k btFinal) uniqueInitialElements
-      expected = map (Just . snd) uniqueInitialElements
-   in length initialElements == length uniqueInitialElements ==> results == expected
+testManualInsertDeleteScenario :: Test
+testManualInsertDeleteScenario = TestCase $ do
+  let bt = emptyBTree tVal
+      bt1 = insertBTree 5 "five" bt
+      bt2 = insertBTree 3 "three" bt1
+      bt3 = insertBTree 4 "four" bt2
+      bt4 = deleteBTree 3 bt3
+  assertEqual "After deleting key 3, it should be removed" Nothing (searchBTree bt4 3)
+  assertEqual "Key 4 should still be present" (Just "four") (searchBTree bt4 4)
 
-main :: IO ()
-main = do
-  _ <- runTestTT $ TestList [testInsert, testLookup]
-  quickCheck prop_insertLookup
-  quickCheck prop_insertDeleteLookup
-  quickCheck prop_duplicateKeyUpdate
-  quickCheck prop_deleteNonExistingKey
-  quickCheck prop_multipleInsertLookup
-  quickCheck prop_addElementDoesNotDeleteOthers
+testMergeAfterDeletion :: Test
+testMergeAfterDeletion = TestCase $ do
+  let keys = [2, 4, 6, 8, 10, 1, 3, 5, 7, 9]
+      bt = insertMany tVal (map (\x -> (x, show x)) keys) (emptyBTree tVal)
+      btDel = deleteBTree 5 bt
+  assertEqual "After deleting key 5, it should be removed" Nothing (searchBTree btDel 5)
+  assertEqual "Key 6 should still be present" (Just "6") (searchBTree btDel 6)
+
+testReinsertDeletedKey :: Test
+testReinsertDeletedKey = TestCase $ do
+  let bt = emptyBTree tVal
+      bt1 = insertMany tVal (map (\x -> (x, show x)) [10, 20, 5, 15]) bt
+      bt2 = deleteBTree 10 bt1
+      bt3 = insertBTree 10 "Arman" bt2
+  assertEqual "Reinserting deleted key 10 should return its new value" (Just "Arman") (searchBTree bt3 10)
+  assertEqual "20 should still be present" (Just "20") (searchBTree bt3 20)
+
+testInsertDuplicateKeys :: Test
+testInsertDuplicateKeys = TestCase $ do
+  let bt = emptyBTree tVal
+      bt1 = insertBTree 5 "five" bt
+      bt2 = insertBTree 5 "FIVE" bt1
+      bt3 = insertBTree 6 "six" bt2
+      bt4 = insertBTree 5 "Vincent" bt3
+  assertEqual "After multiple dup inserts, key 5 should have the latest value" (Just "Vincent") (searchBTree bt4 5)
+  assertEqual "Key 6 should still be present" (Just "six") (searchBTree bt4 6)
+
+testDeleteWithNegativeKeys :: Test
+testDeleteWithNegativeKeys = TestCase $ do
+  let keys = [0, 1, 2, -2, 3, 4, 5, -3, -4, -1]
+      bt = insertMany tVal (map (\x -> (x, show x)) keys) (emptyBTree tVal)
+      btDel = deleteMany [2, 4, 6, 8, 10] bt
+  mapM_
+    ( \k ->
+        if k `elem` [2, 4, 6, 8, 10]
+          then assertEqual ("Deleted key " ++ show k ++ " should return Nothing") Nothing (searchBTree btDel k)
+          else assertEqual ("Remaining key " ++ show k ++ " should still be present") (Just (show k)) (searchBTree btDel k)
+    )
+    keys
+
+unitTests :: Test
+unitTests =
+  TestList
+    [ testEmptyTreeSearch,
+      testInsertSingleElement,
+      testInsertTwoElements,
+      testInsertMultipleElements,
+      testSearchNonExistingKey,
+      testDeleteExistingKey,
+      testDeleteNonExistingKey,
+      testSplitRootOnInsert,
+      testInsertReversedOrder,
+      testDeleteFromMultiSplitTree,
+      testRootBecomesEmptyAfterDeletion,
+      testUpdateDuplicateKey,
+      testInsertAscendingOrder,
+      testInsertDescendingOrder,
+      testManualInsertDeleteScenario,
+      testMergeAfterDeletion,
+      testReinsertDeletedKey,
+      testInsertDuplicateKeys,
+      testDeleteWithNegativeKeys
+    ]
+
+-- QUICKCHECK PROPERTIES
+prop_insertSearch :: [Int] -> Property
+prop_insertSearch xs =
+  not (null xs)
+    ==> let keys = nub xs
+            bt = insertMany tVal (map (\x -> (x, show x)) keys) (emptyBTree tVal)
+         in all (\k -> searchBTree bt k == Just (show k)) keys
+
+prop_insertOrdered :: [Int] -> Bool
+prop_insertOrdered xs =
+  let sortedKeys = sort (nub xs)
+      bt = insertMany tVal (map (\x -> (x, show x)) sortedKeys) (emptyBTree tVal)
+   in all (\k -> searchBTree bt k == Just (show k)) sortedKeys
+
+prop_insertReverse :: [Int] -> Bool
+prop_insertReverse xs =
+  let sortedKeys = sort (nub xs)
+      revKeys = reverse sortedKeys
+      bt = insertMany tVal (map (\x -> (x, show x)) revKeys) (emptyBTree tVal)
+   in all (\k -> searchBTree bt k == Just (show k)) sortedKeys
+
+runAllTests :: IO ()
+runAllTests = do
+  putStrLn "Running unit tests"
+  _ <- runTestTT unitTests
+  putStrLn "\nRunning QC properties"
+  QC.quickCheck prop_insertSearch
+  QC.quickCheck prop_insertOrdered
+  QC.quickCheck prop_insertReverse
