@@ -100,7 +100,7 @@ main = do
   putStrLn "Database initialized with 'students', 'classes', and 'teachers' tables."
   putStrLn "You can now enter SQL queries. Type 'exit' or 'quit' to terminate."
 
-  loop db
+  loop emptyDatabase
 
 loop :: Database -> IO ()
 loop db = do

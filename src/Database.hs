@@ -7,6 +7,7 @@ import BTree
 import Control.Monad (mplus, void)
 import Data.ByteString qualified as BS
 import Data.Function ((&))
+import Data.IORef (IORef, atomicModifyIORef', newIORef)
 import Data.List (elemIndex, nub, sort, sortBy)
 import Data.Maybe (catMaybes, fromMaybe)
 import Data.Serialize (Serialize)
@@ -28,6 +29,7 @@ import Query
   )
 import Query qualified as Q
 import System.Directory (createDirectoryIfMissing, doesFileExist)
+import System.IO.Unsafe (unsafePerformIO)
 import Test.HUnit (Assertion, Test (..), assert, assertEqual, runTestTT, (~:), (~?=))
 import Test.QuickCheck
 import Test.QuickCheck.Arbitrary
@@ -112,6 +114,14 @@ data EvalContext = EvalContext
     allTables :: [(VariableName, DbTable)]
   }
 
+{-# NOINLINE globalPkCounter #-}
+globalPkCounter :: IORef Int
+globalPkCounter = unsafePerformIO (newIORef 0)
+
+-- A helper to get the next global primary key
+nextGlobalId :: IO Int
+nextGlobalId = atomicModifyIORef' globalPkCounter (\x -> (x + 1, x + 1))
+
 -- | PK name
 primaryKeyName :: VariableName
 primaryKeyName = VariableName "id"
@@ -193,23 +203,55 @@ executeQuery (INSERT tbl insertCols tResult) db =
   let insertedRows = executeTableResult tResult db
       Just table = lookup tbl (dbTables db)
       pkName = dbPrimaryKeyName table
-      -- Re-map the inserted rows to have correct columns and values
+
+      -- Modified code begins here:
       finalRows =
         map
           ( \r ->
-              let newCols = pkName : insertCols
-                  -- The first value of row is currently primaryKey r, others are values r
-                  newVals = primaryKey r : values r
-               in Row (primaryKey r) newCols newVals
+              let (pkVal, otherVals) = case elemIndex pkName (columnNames r) of
+                    Just idx ->
+                      -- PK is provided in r
+                      let providedPk = values r !! idx
+                       in (providedPk, removeIndex idx (values r))
+                    Nothing ->
+                      -- PK not provided in this row, generate a new one
+                      let newPk = IntVal (unsafePerformIO nextGlobalId)
+                       in (newPk, values r)
+
+                  newCols = pkName : (filter (/= pkName) insertCols)
+                  newVals =
+                    if pkName `elem` insertCols
+                      then
+                        -- If user provided pk col, we re-insert it in front
+                        pkVal : (map snd (filter ((/= pkName) . fst) (zip (columnNames r) (otherVals))))
+                      else
+                        -- If user did not provide pk col at all, just pkVal plus values in order they were given
+                        pkVal : otherVals
+               in Row pkVal newCols newVals
           )
           insertedRows
       updatedDb = foldr (insertRow tbl) db finalRows
    in (updatedDb, [])
 executeQuery (CREATE tbl cols) db =
-  let pk = fst (head cols)
-      allCols = map fst cols
-      updatedDb = Database.createTable tbl pk allCols db
+  let -- Extract just the column names
+      allColNames = map fst cols
+
+      -- Ensure there is an "id" column, which will serve as our primary key
+      -- If user didn't specify "id", we add it ourselves at the front
+      finalCols =
+        if VariableName "id" `elem` allColNames
+          then allColNames
+          else VariableName "id" : allColNames
+
+      -- Our primary key is always "id"
+      pk = VariableName "id"
+
+      updatedDb = Database.createTable tbl pk finalCols db
    in (updatedDb, [])
+
+-- Helper that remove a value from a list by index
+removeIndex :: Int -> [a] -> [a]
+removeIndex i xs = take i xs ++ drop (i + 1) xs
 
 -- Executes a table result query
 executeTableResult :: TableResult -> Database -> [Row]
