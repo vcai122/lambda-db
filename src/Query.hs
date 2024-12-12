@@ -47,10 +47,6 @@ data BinaryOp
   | Lt -- `<`  :: a -> a -> Bool
   | Le -- `<=` :: a -> a -> Bool
   | Concat -- `..` :: String -> String -> String
-  -- MAYBE IMPLEMENT THESE
-  -- \| Like
-  -- \| In
-  -- \| Between
   deriving (Show, Enum, Bounded, Eq)
 
 instance Arbitrary BinaryOp where
@@ -109,7 +105,14 @@ instance Pretty ColType where
   prettyPrint StringType = "string"
 
 instance Arbitrary Value where
-  arbitrary = QC.oneof [pure NilVal, IntVal <$> arbitrary, DoubleVal <$> arbitrary, BoolVal <$> arbitrary, StringVal <$> safeString]
+  arbitrary =
+    QC.oneof
+      [ pure NilVal,
+        IntVal <$> arbitrary,
+        DoubleVal <$> arbitrary,
+        BoolVal <$> arbitrary,
+        StringVal <$> safeString
+      ]
     where
       safeString = filter (/= '"') <$> arbitrary
   shrink NilVal = []
@@ -204,7 +207,13 @@ data Expression
   deriving (Show, Eq)
 
 instance Arbitrary Expression where
-  arbitrary = QC.oneof [Column <$> arbitrary, Value <$> arbitrary, BinaryOp <$> arbitrary <*> arbitrary <*> arbitrary, UnaryOp <$> arbitrary <*> arbitrary]
+  arbitrary =
+    QC.oneof
+      [ Column <$> arbitrary,
+        Value <$> arbitrary,
+        BinaryOp <$> arbitrary <*> arbitrary <*> arbitrary,
+        UnaryOp <$> arbitrary <*> arbitrary
+      ]
   shrink (Column c) = Column <$> shrink c
   shrink (Value v) = Value <$> shrink v
   shrink (BinaryOp op e1 e2) = BinaryOp op <$> shrink e1 <*> shrink e2
@@ -257,7 +266,12 @@ data IntermediaryTable
   deriving (Show, Eq)
 
 instance Arbitrary IntermediaryTable where
-  arbitrary = QC.frequency [(5, Table <$> arbitrary), (1, TableResult <$> arbitrary), (2, Join <$> arbitrary <*> arbitrary <*> arbitrary)]
+  arbitrary =
+    QC.frequency
+      [ (5, Table <$> arbitrary),
+        (1, TableResult <$> arbitrary),
+        (2, Join <$> arbitrary <*> arbitrary <*> arbitrary)
+      ]
   shrink (Table t) = Table <$> shrink t
   shrink (TableResult t) = TableResult <$> shrink t
   shrink (Join l r e) =
@@ -362,13 +376,6 @@ instance Pretty Query where
     where
       printCol (n, t) = prettyPrint n ++ " " ++ prettyPrint t
 
--- TODO: I WAS HERE
-
-createQuery = CREATE (VariableName "table1") [(VariableName "a", IntType), (VariableName "b", StringType)]
-
--- >>> prettyPrint createQuery
--- "CREATE TABLE table1 (a int, b string)"
-
 type Parser a = P.Parsec String () a
 
 caseInsensitiveStringP :: String -> Parser String
@@ -380,14 +387,6 @@ caseInsensitiveStringP s = P.try (doIt <* P.spaces)
       if map Char.toLower chars == map Char.toLower s
         then return chars
         else fail ("looking for\n" ++ s ++ "\nbut got\n" ++ chars)
-
--- else fail ("looking for\n" ++ s ++ "\nbut got\n" ++ nextWord)
-
--- >>> P.parse (P.optionMaybe (caseInsensitiveStringP "AS")) "" "s"
--- Right Nothing
-
--- >>> P.parse (P.choice [caseInsensitiveStringP "SELECT", wordP]) "" "selecta"
--- Right "selecta"
 
 untilP :: (Char -> Bool) -> Parser String
 untilP f = P.many1 (P.satisfy (not . f)) <* P.spaces
@@ -575,6 +574,9 @@ parseQuery :: String -> Query
 parseQuery s = case P.parse queryParser "" s of
   Left err -> error (show err)
   Right q -> q
+
+parseQueryEither :: String -> Either P.ParseError Query
+parseQueryEither = P.parse queryParser ""
 
 test_basic_select :: Test
 test_basic_select =
